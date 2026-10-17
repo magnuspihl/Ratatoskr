@@ -40,6 +40,12 @@ const MIGRATIONS: string[] = [
      uses INTEGER NOT NULL DEFAULT 1,
      PRIMARY KEY (user_id, address)
    );`,
+  `CREATE TABLE image_domains (
+     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     domain TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (user_id, domain)
+   );`,
 ];
 
 export const DEFAULT_PREFERENCES: Preferences = {
@@ -105,7 +111,7 @@ function toView(r: AccountRow): AccountView {
 
 /**
  * Persistence for the only state Ratatoskr keeps: users, their (encrypted) account settings,
- * preferences and recently used recipients. No mail content is ever stored.
+ * preferences, recently used recipients and sender domains allowed to show images. No mail content is ever stored.
  *
  * Every account query is scoped by user id; there is deliberately no "get account by id" without
  * an owner, which keeps per-user isolation enforced at the data layer.
@@ -316,5 +322,28 @@ export class Store {
          ORDER BY uses DESC, last_used DESC LIMIT ?`,
       )
       .all(userId, like, like, limit) as { name: string; address: string }[];
+  }
+
+  // ---- sender domains whose remote images load automatically -----------------
+  // Domains are stored normalised (lowercase ASCII/punycode); callers validate them first.
+
+  listImageDomains(userId: string): string[] {
+    return (
+      this.db.prepare('SELECT domain FROM image_domains WHERE user_id = ? ORDER BY domain').all(userId) as { domain: string }[]
+    ).map((r) => r.domain);
+  }
+
+  /** Returns false if the user already has `max` domains (re-adding an existing one is fine). */
+  addImageDomain(userId: string, domain: string, max: number): boolean {
+    const count = (this.db.prepare('SELECT COUNT(*) AS n FROM image_domains WHERE user_id = ?').get(userId) as { n: number }).n;
+    const exists = !!this.db.prepare('SELECT 1 FROM image_domains WHERE user_id = ? AND domain = ?').get(userId, domain);
+    if (exists) return true;
+    if (count >= max) return false;
+    this.db.prepare('INSERT INTO image_domains (user_id, domain, created_at) VALUES (?, ?, ?)').run(userId, domain, Date.now());
+    return true;
+  }
+
+  removeImageDomain(userId: string, domain: string): boolean {
+    return this.db.prepare('DELETE FROM image_domains WHERE user_id = ? AND domain = ?').run(userId, domain).changes > 0;
   }
 }

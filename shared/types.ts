@@ -122,7 +122,19 @@ export interface MessageDetail {
   htmlStyle: HtmlStyle | null;
   remoteContentBlocked: number;
   remoteContentLoaded: boolean;
+  /** Domain of the From address, if it has a valid one. */
+  senderDomain: DomainName | null;
+  /** Allowlisted domain that made remote images load automatically. */
+  imagesAllowedBy: DomainName | null;
+  /** The sender is allowlisted, but the message failed DMARC so images were not loaded automatically. */
+  allowlistSkipped: 'dmarc-fail' | null;
   attachments: AttachmentView[];
+}
+
+/** A domain in its stored ASCII (punycode) form and its human-readable form. */
+export interface DomainName {
+  domain: string;
+  display: string;
 }
 
 export type MessageAction =

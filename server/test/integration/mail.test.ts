@@ -28,6 +28,7 @@ import { undoPlan } from '../../../web/src/swipe.js';
 
 const gm = inject('greenmail');
 const ALICE = 'alice@example.com';
+const PIXEL = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==', 'base64');
 const BOB = 'bob@example.com';
 
 let ctx: App;
@@ -41,12 +42,12 @@ function imapClient(user: string) {
   return c;
 }
 
-function rawMessage(opts: { from: string; to: string; subject: string; date: Date; html?: string; text?: string; id: string }) {
+function rawMessage(opts: { from: string; to: string; subject: string; date: Date; html?: string; text?: string; id: string; headers?: string }) {
   const body = opts.html
     ? `Content-Type: text/html; charset=utf-8\r\n\r\n${opts.html}`
     : `Content-Type: text/plain; charset=utf-8\r\n\r\n${opts.text ?? 'hello'}`;
   return Buffer.from(
-    `From: ${opts.from}\r\nTo: ${opts.to}\r\nSubject: ${opts.subject}\r\nDate: ${opts.date.toUTCString()}\r\n` +
+    `${opts.headers ?? ''}From: ${opts.from}\r\nTo: ${opts.to}\r\nSubject: ${opts.subject}\r\nDate: ${opts.date.toUTCString()}\r\n` +
       `Message-ID: <${opts.id}@example.com>\r\nMIME-Version: 1.0\r\n${body}\r\n`,
   );
 }
@@ -117,7 +118,12 @@ beforeAll(async () => {
     RATATOSKR_BASE_URL: 'http://localhost:8080',
   });
   const store = new Store(':memory:', new Keyring(config.secretKey).credentialKey);
-  ctx = await buildApp(config, { store, logger: false });
+  // Remote images: only img.example.com "exists"; everything else fails like an unreachable host.
+  const fetchImage = async (url: string) => {
+    if (new URL(url).hostname !== 'img.example.com') throw new Error('unreachable');
+    return { contentType: 'image/png', body: PIXEL };
+  };
+  ctx = await buildApp(config, { store, logger: false, fetchImage });
 
   const login = await ctx.app.inject({ method: 'GET', url: '/auth/dev-login' });
   cookie = String(login.cookies.find((c) => c.name === 'rk_session')!.value);
@@ -588,5 +594,133 @@ describe('unread only', () => {
       action: { type: 'seen', value: true },
     });
     expect((await listAll('unread=1')).map((m) => m.subject)).not.toContain('Fresh alpha');
+  });
+});
+
+describe('sender-domain image allowlist', () => {
+  const html = '<p>Sale!</p><img src="https://img.example.com/banner.png">';
+  const refs: Record<string, string> = {};
+  const message = async (name: string, remote?: '0' | '1') =>
+    (await api<MessageDetail>('GET', `/api/message?${refs[name]}${remote ? `&remote=${remote}` : ''}`)).json;
+  const asMallory = () => {
+    const mallory = ctx.store.upsertUser('https://auth.example.com', 'mallory', 'mallory@example.com', 'Mallory');
+    const malloryCookie = `rk_session=${sealJson(new Keyring(secretKey).sessionKey, { uid: mallory.id }, 600, 'session')}`;
+    return async (method: 'GET' | 'POST' | 'DELETE', url: string, body?: unknown) => {
+      const res = await ctx.app.inject({
+        method,
+        url,
+        headers: { cookie: malloryCookie, 'x-ratatoskr': '1', ...(body ? { 'content-type': 'application/json' } : {}) },
+        payload: body ? JSON.stringify(body) : undefined,
+      });
+      return { status: res.statusCode, json: JSON.parse(res.body) as unknown };
+    };
+  };
+
+  beforeAll(async () => {
+    // A separate folder, so the INBOX counts used above are unaffected.
+    const a = imapClient(ALICE);
+    await a.connect();
+    await a.mailboxCreate('Newsletters').catch(() => undefined);
+    const date = new Date(Date.UTC(2026, 1, 1, 12));
+    const seed: [string, string, string?][] = [
+      ['plain', 'Shop <news@news.example.com>'],
+      ['spoofed', 'Shop <news@news.example.com>', 'Authentication-Results: mx.example.net; spf=fail; dmarc=fail (p=reject) header.from=news.example.com\r\n' +
+        'Authentication-Results: mx.example.net; dmarc=pass header.from=news.example.com\r\n'],
+      ['passed', 'Shop <news@news.example.com>', 'Authentication-Results: mx.example.net; dkim=pass; dmarc=pass header.from=news.example.com\r\n'],
+      ['lookalike', 'Shop <news@badexample.com>'],
+    ];
+    for (const [name, from, headers] of seed) {
+      await a.append('Newsletters', rawMessage({ from, to: ALICE, subject: `allowlist ${name}`, date, id: `allow-${name}`, html, headers }), [], date);
+    }
+    await a.logout();
+    const list = await listAll(`accountId=${accounts.alice!.id}&folder=Newsletters`);
+    for (const m of list) refs[m.subject.replace('allowlist ', '')] = `accountId=${m.accountId}&folder=Newsletters&uid=${m.uid}&uidValidity=${m.uidValidity}`;
+    expect(Object.keys(refs).sort()).toEqual(['lookalike', 'passed', 'plain', 'spoofed']);
+  });
+
+  it('blocks images by default and reports the sender domain', async () => {
+    const d = await message('plain');
+    expect(d.remoteContentLoaded).toBe(false);
+    expect(d.remoteContentBlocked).toBe(1);
+    expect(d.senderDomain).toEqual({ domain: 'news.example.com', display: 'news.example.com' });
+    expect(d.imagesAllowedBy).toBeNull();
+    expect(d.html).not.toContain('data:image/png');
+  });
+
+  it('validates domains and requires the CSRF header', async () => {
+    expect((await api('GET', '/api/image-domains')).json).toEqual([]);
+    for (const domain of ['com', 'not a domain', '127.0.0.1', 'a..example.com', '']) {
+      expect((await api('POST', '/api/image-domains', { domain })).status, domain).toBe(400);
+    }
+    expect((await api('POST', '/api/image-domains', { nope: 1 })).status).toBe(400);
+    const noCsrf = await ctx.app.inject({
+      method: 'POST', url: '/api/image-domains', headers: { cookie, 'content-type': 'application/json' }, payload: '{"domain":"example.com"}',
+    });
+    expect(noCsrf.statusCode).toBe(403);
+    expect((await ctx.app.inject({ method: 'GET', url: '/api/image-domains' })).statusCode).toBe(401);
+    expect((await api('GET', '/api/image-domains')).json).toEqual([]);
+  });
+
+  it('inlines images automatically for an allowlisted domain and its subdomains', async () => {
+    const added = await api('POST', '/api/image-domains', { domain: 'Example.COM' });
+    expect(added.status).toBe(200);
+    expect(added.json).toEqual([{ domain: 'example.com', display: 'example.com' }]);
+    // Adding again is harmless; IDN input is stored as punycode.
+    await api('POST', '/api/image-domains', { domain: 'example.com.' });
+    expect((await api('POST', '/api/image-domains', { domain: 'Bücher.example' })).json).toEqual([
+      { domain: 'example.com', display: 'example.com' },
+      { domain: 'xn--bcher-kva.example', display: 'bücher.example' },
+    ]);
+
+    for (const name of ['plain', 'passed']) {
+      const d = await message(name);
+      expect(d.remoteContentLoaded, name).toBe(true);
+      expect(d.remoteContentBlocked).toBe(0);
+      expect(d.imagesAllowedBy).toEqual({ domain: 'example.com', display: 'example.com' });
+      expect(d.html).toContain(`data:image/png;base64,${PIXEL.toString('base64')}`);
+      expect(d.html).not.toContain('img.example.com');
+    }
+    // remote=0 still gets the blocked version (used for quoting in replies).
+    const blocked = await message('plain', '0');
+    expect(blocked.remoteContentLoaded).toBe(false);
+    expect(blocked.html).not.toContain('data:image/png');
+  });
+
+  it('does not auto-load lookalike domains or messages that failed DMARC', async () => {
+    const lookalike = await message('lookalike');
+    expect(lookalike.remoteContentLoaded).toBe(false);
+    expect(lookalike.imagesAllowedBy).toBeNull();
+
+    const spoofed = await message('spoofed');
+    expect(spoofed.remoteContentLoaded).toBe(false);
+    expect(spoofed.allowlistSkipped).toBe('dmarc-fail');
+    expect(spoofed.html).not.toContain('data:image/png');
+    // The user can still load them by hand.
+    const loaded = await message('spoofed', '1');
+    expect(loaded.remoteContentLoaded).toBe(true);
+    expect(loaded.html).toContain('data:image/png');
+  });
+
+  it('keeps every user\'s list separate', async () => {
+    const as = asMallory();
+    expect((await as('GET', '/api/image-domains')).json).toEqual([]);
+    expect((await as('POST', '/api/image-domains', { domain: 'other.test' })).json).toEqual([{ domain: 'other.test', display: 'other.test' }]);
+    // Mallory can't remove (or even see) another user's entries.
+    expect((await as('DELETE', '/api/image-domains/example.com')).status).toBe(404);
+    expect(((await api<{ domain: string }[]>('GET', '/api/image-domains')).json).map((d) => d.domain)).toEqual([
+      'example.com',
+      'xn--bcher-kva.example',
+    ]);
+    expect((await as('GET', '/api/image-domains')).json).toEqual([{ domain: 'other.test', display: 'other.test' }]);
+  });
+
+  it('stops auto-loading once the domain is removed', async () => {
+    expect((await api('DELETE', '/api/image-domains/not_a_domain')).status).toBe(400);
+    expect((await api('DELETE', `/api/image-domains/${encodeURIComponent('BÜCHER.example')}`)).status).toBe(200);
+    expect((await api('DELETE', '/api/image-domains/example.com')).json).toEqual([]);
+    expect((await api('DELETE', '/api/image-domains/example.com')).status).toBe(404);
+    const d = await message('plain');
+    expect(d.remoteContentLoaded).toBe(false);
+    expect(d.imagesAllowedBy).toBeNull();
   });
 });

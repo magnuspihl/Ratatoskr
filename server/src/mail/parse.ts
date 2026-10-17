@@ -1,6 +1,6 @@
 import PostalMime from 'postal-mime';
 import type { Address as PmAddress, Attachment, Email } from 'postal-mime';
-import type { Address, AttachmentView, MessageDetail } from '../../../shared/types.js';
+import type { Address, AttachmentView, DomainName, MessageDetail } from '../../../shared/types.js';
 import { sanitizeEmailHtml, type SanitizeOptions } from './sanitize.js';
 
 export type ParsedEmail = Email;
@@ -50,6 +50,12 @@ export interface DetailMeta {
 export interface DetailOptions {
   allowRemote: boolean;
   resolveRemote: SanitizeOptions['resolveRemote'];
+  /** Outcome of the sender-domain image allowlist (see imageAllowlist.ts). */
+  allowlist?: {
+    senderDomain: DomainName | null;
+    allowedBy: DomainName | null;
+    skipped: MessageDetail['allowlistSkipped'];
+  };
 }
 
 /** Turn a parsed message into the view model sent to the browser, sanitizing any HTML. */
@@ -116,6 +122,9 @@ export function buildMessageDetail(email: ParsedEmail, meta: DetailMeta, opts: D
     htmlStyle,
     remoteContentBlocked,
     remoteContentLoaded: opts.allowRemote,
+    senderDomain: opts.allowlist?.senderDomain ?? null,
+    imagesAllowedBy: opts.allowlist?.allowedBy ?? null,
+    allowlistSkipped: opts.allowlist?.skipped ?? null,
     attachments,
   };
 }

@@ -24,7 +24,9 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
   indicators, and an account colour tag in the unified view.
 - Reading plain text and HTML, with inline (`cid:`) images and attachment downloads. Remote
   images are blocked by default; "Load images" has the server fetch them and embed them in the
-  message, so the sender never sees your IP address.
+  message, so the sender never sees your IP address. "Always load from example.com" adds the
+  sender's domain (and its subdomains) to a per-user list whose mail loads images automatically;
+  manage the list in Settings.
 - Mark read/unread, flag, move, archive, delete (to Trash, expunge only from Trash), multi-select.
 - Compose, reply, reply-all, and forward (with the original attachments). Includes a light
   rich-text editor, an automatic plain-text alternative, attachments, drafts (saved to the
@@ -148,6 +150,12 @@ Every message is assumed to be hostile.
   and a 20 s budget. Anything over a limit, failing or blocked is left out, keeping its size and
   alt text as a placeholder. Fetched images sit in a small in-memory cache (per user, 10
   minutes, 64 MB) so toggling or reopening a message doesn't download them again.
+- **Sender-domain allowlist.** The server decides when it fetches a message: if the From domain
+  is on the user's list (exact match or a subdomain; case-insensitive, IDN normalised to
+  punycode), images load automatically through the same fetcher. From is easy to forge, so as a
+  cheap guard nothing auto-loads when the topmost `Authentication-Results` header (the one added
+  by your own mail server) records `dmarc=fail` for the From domain; the user can still click
+  "Load images". Without that header, or with `pass`/`none`, the allowlist applies as normal.
 - `cid:` images are inlined as `data:` URLs. Attachments are always served as downloads
   (`Content-Disposition: attachment`, `application/octet-stream`, `nosniff`, sandbox CSP).
 - The app sends a strict CSP (`script-src 'self'`), `frame-ancestors 'none'`, `nosniff`,

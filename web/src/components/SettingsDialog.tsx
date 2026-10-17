@@ -1,7 +1,7 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { useState } from 'react';
-import type { Preferences, SwipeAction } from '../../../shared/types';
+import type { DomainName, Preferences, SwipeAction } from '../../../shared/types';
 import { api } from '../api';
 
 const SWIPE_OPTIONS: [SwipeAction, string][] = [
@@ -76,9 +76,72 @@ export function SettingsDialog({ prefs, onClose }: { prefs: Preferences; onClose
             <input type="checkbox" checked={v.markReadOnOpen} onChange={(e) => void save({ ...v, markReadOnOpen: e.target.checked })} />
             Mark messages as read when opened
           </label>
+          <ImageDomains />
           {error && <div className="error-text">{error}</div>}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Sender domains whose mail loads remote images automatically (subdomains included). */
+function ImageDomains() {
+  const qc = useQueryClient();
+  const domains = useQuery({ queryKey: ['imageDomains'], queryFn: api.imageDomains });
+  const [input, setInput] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const change = async (run: () => Promise<DomainName[]>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      qc.setQueryData(['imageDomains'], await run());
+      await qc.invalidateQueries({ queryKey: ['message'] });
+      return true;
+    } catch (err) {
+      setError((err as Error).message);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const add = async () => {
+    if (input.trim() && (await change(() => api.addImageDomain(input.trim())))) setInput('');
+  };
+
+  return (
+    <div>
+      <label className="label">Always load images from</label>
+      {domains.data && domains.data.length > 0 ? (
+        <ul className="domain-list">
+          {domains.data.map((d) => (
+            <li key={d.domain}>
+              <span title={d.display !== d.domain ? d.domain : undefined}>{d.display}</span>
+              <button className="icon-btn" disabled={busy} title={`Remove ${d.display}`} onClick={() => void change(() => api.removeImageDomain(d.domain))}>
+                <X size={15} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div className="hint">{domains.isLoading ? 'Loading…' : 'No domains yet. Images from other senders stay blocked until you load them.'}</div>
+      )}
+      <form
+        className="domain-add"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void add();
+        }}
+      >
+        <input className="input" value={input} onChange={(e) => setInput(e.target.value)} placeholder="example.com" aria-label="Domain to allow" maxLength={300} />
+        <button className="btn" type="submit" disabled={busy || !input.trim()}>
+          Add
+        </button>
+      </form>
+      <div className="hint">Also covers subdomains. Not applied to messages that fail the sender check (DMARC).</div>
+      {(error || domains.error) && <div className="error-text">{error ?? (domains.error as Error).message}</div>}
     </div>
   );
 }
