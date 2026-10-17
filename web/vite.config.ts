@@ -1,10 +1,46 @@
 import path from 'node:path';
 import react from '@vitejs/plugin-react';
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, type Plugin } from 'vite';
+import { isDevHostAllowed, parseHostSuffix } from '../shared/devHosts.ts';
 
 const root = path.resolve(import.meta.dirname, '..');
 
-export default defineConfig(({ mode }) => {
+/**
+ * Vite's allowedHosts can't express "any host ending in --foo.example.com", so when
+ * RATATOSKR_DEV_ALLOWED_HOST_SUFFIX is set the built-in check is switched off and this plugin
+ * enforces the same rule (plus the suffix) for plain requests and for WebSocket upgrades (HMR and
+ * the proxied /api/ws). Dev server only: `vite build` never runs it.
+ */
+export function devHostGuard(hosts: string[], suffix: string): Plugin {
+  const allowed = (host: string | undefined) => isDevHostAllowed(host, { hosts, suffix });
+  return {
+    name: 'ratatoskr-dev-host-guard',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        if (allowed(req.headers.host)) return next();
+        res.writeHead(403, { 'content-type': 'text/plain' });
+        res.end(`Blocked request. This host (${JSON.stringify(req.headers.host ?? '')}) is not allowed.`);
+      });
+      const http = server.httpServer;
+      if (!http) return;
+      // Gate 'upgrade' before any listener (Vite's HMR, the proxy) sees it, whatever their order.
+      const emit = http.emit.bind(http) as (event: string, ...args: unknown[]) => boolean;
+      http.emit = ((event: string, ...args: unknown[]) => {
+        if (event === 'upgrade') {
+          const [req, socket] = args as [{ headers: { host?: string } }, { end: (data: string) => void }];
+          if (!allowed(req.headers.host)) {
+            socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+            return true;
+          }
+        }
+        return emit(event, ...args);
+      }) as typeof http.emit;
+    },
+  };
+}
+
+export default defineConfig(({ command, mode }) => {
   const env = { ...loadEnv(mode, root, ''), ...process.env };
   const backend = `http://127.0.0.1:${env.BACKEND_PORT || '8081'}`;
   // Vite rejects unknown Host headers. Accept localhost plus the host from RATATOSKR_BASE_URL
@@ -15,30 +51,14 @@ export default defineConfig(({ mode }) => {
   } catch {
     /* ignore */
   }
-  // Coder (CPM) preview proxy: each task reserves a range of ports (CPM_PORT_RANGE), each
-  // reachable at its own host derived from VSCODE_PROXY_URI's "{{port}}--..." template. Allow
-  // every port in the range, not just the one Vite is bound to, so other services in this task
-  // (or a restart on a different port within the range) stay reachable through the proxy.
-  const proxyTemplate = env.VSCODE_PROXY_URI;
-  const portRange = env.CPM_PORT_RANGE;
-  if (proxyTemplate && portRange) {
-    const [start, end] = portRange.split('-').map(Number);
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      for (let port = start; port <= end; port++) {
-        try {
-          allowedHosts.push(new URL(proxyTemplate.replace('{{port}}', String(port))).hostname);
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-  }
+  // Optionally also any host ending in RATATOSKR_DEV_ALLOWED_HOST_SUFFIX (several proxied ports).
+  const suffix = command === 'serve' ? parseHostSuffix(env.RATATOSKR_DEV_ALLOWED_HOST_SUFFIX) : null;
   return {
     root: import.meta.dirname,
-    plugins: [react()],
+    plugins: [react(), ...(suffix ? [devHostGuard(allowedHosts, suffix)] : [])],
     build: { outDir: path.join(root, 'dist/web'), emptyOutDir: true, sourcemap: false },
     server: {
-      allowedHosts,
+      allowedHosts: suffix ? true : allowedHosts,
       // Anchored patterns: only /api/* and /auth/* reach the backend; every other path falls
       // through to Vite's SPA fallback (index.html), so client routes survive a reload.
       proxy: {
