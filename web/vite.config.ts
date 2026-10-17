@@ -15,6 +15,24 @@ export default defineConfig(({ mode }) => {
   } catch {
     /* ignore */
   }
+  // Coder (CPM) preview proxy: each task reserves a range of ports (CPM_PORT_RANGE), each
+  // reachable at its own host derived from VSCODE_PROXY_URI's "{{port}}--..." template. Allow
+  // every port in the range, not just the one Vite is bound to, so other services in this task
+  // (or a restart on a different port within the range) stay reachable through the proxy.
+  const proxyTemplate = env.VSCODE_PROXY_URI;
+  const portRange = env.CPM_PORT_RANGE;
+  if (proxyTemplate && portRange) {
+    const [start, end] = portRange.split('-').map(Number);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      for (let port = start; port <= end; port++) {
+        try {
+          allowedHosts.push(new URL(proxyTemplate.replace('{{port}}', String(port))).hostname);
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
   return {
     root: import.meta.dirname,
     plugins: [react()],
