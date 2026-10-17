@@ -81,6 +81,7 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | `RATATOSKR_MAX_UPLOAD_MB` | no | `25` | Largest total attachment upload when composing. |
 | `LOG_LEVEL` | no | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 | `RATATOSKR_DEV_LOGIN` | no | `false` | Development only: log in as a local dev user without OIDC. Ignored when `NODE_ENV=production` (always set in the image). |
+| `RATATOSKR_DEV_ALLOWED_HOST_SUFFIX` | no | – | Development only: also serve the dev server on any host ending in this suffix (see [Development](#development)). Ignored when `NODE_ENV=production` and by the production build. |
 
 ### OIDC setup
 
@@ -179,7 +180,16 @@ PORT=5173 npm run dev         # Vite on $PORT, backend on $PORT+1 (proxied under
 ```
 
 If you open the dev server through a reverse proxy, set `RATATOSKR_BASE_URL` to that public URL.
-Vite only accepts that host name.
+Vite only accepts that host name (plus `localhost`).
+
+If the same setup is reached through several proxied hostnames that differ only in a leading part
+(e.g. one per port: `5173--myworkspace--me.dev.example.com`, `40140--myworkspace--me.dev.example.com`),
+also set `RATATOSKR_DEV_ALLOWED_HOST_SUFFIX=--myworkspace--me.dev.example.com`. The suffix must
+start with `.` or `--` and is matched exactly at the end of the host name, so lookalikes such as
+`…dev.example.com.evil.test` are refused. In development the WebSocket origin check then follows
+the request host, and dev login works on each of those hosts (cookies are per host, so log in once
+per host). OIDC still needs the real `RATATOSKR_BASE_URL`: its redirect URI is built from it, so OIDC
+logins always return to that one host.
 
 | Command | What it does |
 | --- | --- |
