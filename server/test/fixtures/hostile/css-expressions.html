@@ -1,0 +1,16 @@
+<style>
+@import url("https://evil.example.com/track.css");
+body { background: url(https://evil.example.com/bg.png); }
+p { width: expression(alert(1)); }
+div { behavior: url(evil.htc); -moz-binding: url("https://evil.example.com/xbl.xml#x"); }
+.a { color: red; }
+.b { background-image: u\72l(https://evil.example.com/escaped.png); }
+@font-face { font-family: x; src: url(https://evil.example.com/font.woff); }
+</style></style><img src=x onerror=alert(9)><style>
+h1 { color: blue }
+.c::after { content: "</style><script>alert(10)</script>"; }
+</style>
+<p style="background-image: url('https://evil.example.com/inline.png'); color: green">inline</p>
+<p style="width: expression(alert(11))">expr</p>
+<p style="color: red; background: url(javascript:alert(12))">js url</p>
+<p style="background:u&#114;l(https://evil.example.com/entity.png)">entity</p>

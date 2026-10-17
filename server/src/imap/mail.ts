@@ -1,0 +1,481 @@
+import type { FetchMessageObject, ImapFlow, ListResponse, MessageAddressObject } from 'imapflow';
+import type {
+  AccountCursor,
+  AccountFolders,
+  Address,
+  FolderView,
+  ListResponse as MessageListResponse,
+  MessageAction,
+  MessageDetail,
+  MessageRef,
+  MessageSummary,
+  SpecialUse,
+} from '../../../shared/types.js';
+import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
+import { MailServerError, describeError } from './connect.js';
+import type { ImapPool } from './pool.js';
+import { findTextPart, hasAttachments, SNIPPET_FETCH_BYTES, snippetFromPart, type TextPart } from './snippet.js';
+
+const SPECIAL_USE: Record<string, SpecialUse> = {
+  '\\Inbox': 'inbox',
+  '\\Sent': 'sent',
+  '\\Drafts': 'drafts',
+  '\\Trash': 'trash',
+  '\\Archive': 'archive',
+  '\\Junk': 'junk',
+  '\\All': 'all',
+  '\\Flagged': 'flagged',
+};
+
+/** Extra name fallbacks on top of ImapFlow's built-in localized name detection. */
+const NAME_FALLBACKS: Partial<Record<SpecialUse, RegExp>> = {
+  sent: /^(sent|sent items|sent mail|sent messages|gesendet|envoyés|skickat|sendt)$/i,
+  drafts: /^(drafts?|entwürfe|brouillons|utkast|kladder)$/i,
+  trash: /^(trash|deleted|deleted items|deleted messages|bin|papierkorb|corbeille|papperskorg|papirkurv)$/i,
+  archive: /^(archives?|archiv|arkiv)$/i,
+  junk: /^(junk|spam|junk e-?mail|bulk mail|skräppost|uønsket)$/i,
+};
+
+export class MessageGoneError extends Error {}
+export class StaleError extends Error {}
+
+export interface ListSource {
+  accountId: string;
+  folder: string;
+}
+
+export interface SearchQuery {
+  text: string;
+}
+
+interface FetchedItem {
+  source: ListSource;
+  uidValidity: string;
+  msg: FetchMessageObject;
+  sortTime: number;
+}
+
+interface SourcePage {
+  source: ListSource;
+  uidValidity: string;
+  items: FetchedItem[];
+  /** True if there are no messages older than the oldest item returned. */
+  exhausted: boolean;
+  reset: boolean;
+}
+
+type CursorMap = Record<string, AccountCursor>;
+
+const sourceKey = (s: ListSource) => `${s.accountId}\u0000${s.folder}`;
+
+export function encodeCursor(c: CursorMap): string {
+  return Buffer.from(JSON.stringify(c)).toString('base64url');
+}
+
+export function decodeCursor(raw: string | undefined | null): CursorMap {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: CursorMap = {};
+    for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+      const c = v as Partial<AccountCursor>;
+      if (typeof c.uidValidity === 'string' && Number.isInteger(c.beforeUid) && typeof c.done === 'boolean') {
+        out[k] = { uidValidity: c.uidValidity, beforeUid: c.beforeUid!, done: c.done };
+      }
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function addresses(list: MessageAddressObject[] | undefined): Address[] {
+  return (list ?? []).filter((a) => a.address).map((a) => ({ name: a.name ?? '', address: a.address! }));
+}
+
+function toDate(d: Date | string | undefined): Date | null {
+  if (!d) return null;
+  const date = d instanceof Date ? d : new Date(d);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/**
+ * K-way merge of per-source pages. Each source's items are a queue ordered newest-UID-first; at
+ * every step the queue head with the most recent date wins. Because each source is consumed as a
+ * strict UID-descending prefix, "the lowest UID consumed" is an exact per-source cursor even when
+ * dates and UIDs disagree.
+ */
+export function mergePages(pages: SourcePage[], limit: number, previous: CursorMap) {
+  const queues = pages.map((p) => ({ page: p, idx: 0 }));
+  const picked: FetchedItem[] = [];
+  while (picked.length < limit) {
+    let best: (typeof queues)[number] | null = null;
+    for (const q of queues) {
+      const head = q.page.items[q.idx];
+      if (!head) continue;
+      const bestHead = best ? best.page.items[best.idx]! : null;
+      if (!bestHead || head.sortTime > bestHead.sortTime) best = q;
+    }
+    if (!best) break;
+    picked.push(best.page.items[best.idx]!);
+    best.idx++;
+  }
+  const cursor: CursorMap = {};
+  let more = false;
+  for (const q of queues) {
+    const key = sourceKey(q.page.source);
+    const prev = q.page.reset ? undefined : previous[key];
+    const consumedAll = q.idx >= q.page.items.length;
+    const lastConsumed = q.idx > 0 ? q.page.items[q.idx - 1]!.msg.uid : null;
+    const firstUid = q.page.items[0]?.msg.uid;
+    const beforeUid = lastConsumed ?? prev?.beforeUid ?? (firstUid !== undefined ? firstUid + 1 : Number.MAX_SAFE_INTEGER);
+    const done = consumedAll && q.page.exhausted;
+    cursor[key] = { uidValidity: q.page.uidValidity, beforeUid, done };
+    if (!done) more = true;
+  }
+  return { picked, cursor, more };
+}
+
+export class MailService {
+  constructor(private readonly pool: ImapPool) {}
+
+  // ---- folders -------------------------------------------------------------
+
+  private static specialUse(f: ListResponse): SpecialUse | null {
+    if (f.path.toUpperCase() === 'INBOX') return 'inbox';
+    const su = f.specialUse ? SPECIAL_USE[f.specialUse] : undefined;
+    if (su) return su;
+    for (const [use, re] of Object.entries(NAME_FALLBACKS)) if (re!.test(f.name)) return use as SpecialUse;
+    return null;
+  }
+
+  async listFolders(userId: string, accountId: string): Promise<AccountFolders> {
+    try {
+      const list = await this.pool.folders(userId, accountId, true);
+      const folders: FolderView[] = list.map((f) => ({
+        path: f.path,
+        name: f.name,
+        delimiter: f.delimiter,
+        parentPath: f.parentPath,
+        specialUse: MailService.specialUse(f),
+        selectable: !f.flags.has('\\Noselect') && !f.flags.has('\\NonExistent'),
+        unread: f.status?.unseen ?? null,
+        total: f.status?.messages ?? null,
+      }));
+      return { accountId, folders };
+    } catch (err) {
+      return { accountId, folders: [], error: describeError(err, 'IMAP').message };
+    }
+  }
+
+  /** Find a special-use folder, preferring server-declared SPECIAL-USE over name matches. */
+  async specialFolder(userId: string, accountId: string, use: SpecialUse): Promise<string | null> {
+    const list = await this.pool.folders(userId, accountId);
+    const declared = list.find((f) => f.specialUse && SPECIAL_USE[f.specialUse] === use);
+    if (declared) return declared.path;
+    const byName = list.find((f) => MailService.specialUse(f) === use && !f.flags.has('\\Noselect'));
+    return byName?.path ?? null;
+  }
+
+  // ---- listing -------------------------------------------------------------
+
+  private async fetchSourcePage(
+    userId: string,
+    source: ListSource,
+    cursor: AccountCursor | undefined,
+    limit: number,
+    search: SearchQuery | null,
+  ): Promise<SourcePage> {
+    return this.pool.withMailbox(userId, source.accountId, source.folder, async (client, mailbox) => {
+      const uidValidity = mailbox.uidValidity.toString();
+      let reset = false;
+      if (cursor && cursor.uidValidity !== uidValidity) {
+        reset = true;
+        cursor = undefined;
+      }
+      const empty: SourcePage = { source, uidValidity, items: [], exhausted: true, reset };
+      if (cursor?.done || mailbox.exists === 0) return empty;
+      if (cursor && cursor.beforeUid <= 1) return empty;
+
+      let range: string;
+      let useUid: boolean;
+      let exhausted: boolean;
+      if (search) {
+        const q = search.text;
+        const criteria = cursor
+          ? { uid: `1:${cursor.beforeUid - 1}`, or: [{ subject: q }, { from: q }, { to: q }, { body: q }] }
+          : { or: [{ subject: q }, { from: q }, { to: q }, { body: q }] };
+        const uids = ((await client.search(criteria, { uid: true })) || []).sort((a, b) => a - b);
+        const page = uids.slice(-limit);
+        if (page.length === 0) return empty;
+        range = page.join(',');
+        useUid = true;
+        exhausted = uids.length <= limit;
+      } else {
+        let top = mailbox.exists;
+        if (cursor && cursor.beforeUid < mailbox.uidNext) {
+          // Find the sequence number just below the cursor UID.
+          const exact = (await client.search({ uid: String(cursor.beforeUid) }, { uid: false })) || [];
+          if (exact.length) top = exact[0]! - 1;
+          else {
+            const below = (await client.search({ uid: `1:${cursor.beforeUid - 1}` }, { uid: false })) || [];
+            top = below.length ? Math.max(...below) : 0;
+          }
+        }
+        if (top < 1) return empty;
+        const start = Math.max(1, top - limit + 1);
+        range = `${start}:${top}`;
+        useUid = false;
+        exhausted = start === 1;
+      }
+
+      const msgs = await client.fetchAll(
+        range,
+        { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true },
+        { uid: useUid },
+      );
+      const items = msgs
+        .filter((m) => !cursor || m.uid < cursor.beforeUid)
+        .sort((a, b) => b.uid - a.uid)
+        .map((msg) => ({
+          source,
+          uidValidity,
+          msg,
+          sortTime: (toDate(msg.internalDate) ?? toDate(msg.envelope?.date) ?? new Date(0)).getTime(),
+        }));
+      return { source, uidValidity, items, exhausted, reset };
+    });
+  }
+
+  private async snippets(userId: string, items: FetchedItem[]): Promise<Map<FetchedItem, string>> {
+    const out = new Map<FetchedItem, string>();
+    const bySource = new Map<string, FetchedItem[]>();
+    for (const it of items) {
+      const k = sourceKey(it.source);
+      bySource.set(k, [...(bySource.get(k) ?? []), it]);
+    }
+    await Promise.all(
+      [...bySource.values()].map(async (group) => {
+        const { accountId, folder } = group[0]!.source;
+        try {
+          await this.pool.withMailbox(userId, accountId, folder, async (client) => {
+            const byPart = new Map<string, { part: TextPart; items: FetchedItem[] }>();
+            for (const it of group) {
+              const part = findTextPart(it.msg.bodyStructure);
+              if (!part) continue;
+              const k = `${part.part}|${part.type}|${part.encoding}|${part.charset}`;
+              const e = byPart.get(k) ?? { part, items: [] };
+              e.items.push(it);
+              byPart.set(k, e);
+            }
+            for (const { part, items: partItems } of byPart.values()) {
+              const byUid = new Map(partItems.map((i) => [i.msg.uid, i]));
+              const fetched = await client.fetchAll(
+                partItems.map((i) => i.msg.uid).join(','),
+                { uid: true, bodyParts: [{ key: part.part, start: 0, maxLength: SNIPPET_FETCH_BYTES }] },
+                { uid: true },
+              );
+              for (const f of fetched) {
+                const it = byUid.get(f.uid);
+                const buf = f.bodyParts ? [...f.bodyParts.values()][0] : undefined;
+                if (!it || !buf) continue;
+                out.set(it, snippetFromPart(buf, part, (f.binaryParts?.size ?? 0) > 0));
+              }
+            }
+          });
+        } catch {
+          /* snippets are best-effort */
+        }
+      }),
+    );
+    return out;
+  }
+
+  private toSummary(it: FetchedItem, snippet: string): MessageSummary {
+    const { msg } = it;
+    const env = msg.envelope ?? {};
+    const flags = msg.flags ?? new Set<string>();
+    const date = toDate(env.date) ?? toDate(msg.internalDate) ?? new Date(0);
+    return {
+      accountId: it.source.accountId,
+      folder: it.source.folder,
+      uid: msg.uid,
+      uidValidity: it.uidValidity,
+      messageId: env.messageId ?? null,
+      subject: env.subject ?? '',
+      from: addresses(env.from),
+      to: addresses(env.to),
+      date: date.toISOString(),
+      snippet,
+      seen: flags.has('\\Seen'),
+      flagged: flags.has('\\Flagged'),
+      answered: flags.has('\\Answered'),
+      draft: flags.has('\\Draft'),
+      hasAttachments: hasAttachments(msg.bodyStructure),
+      size: msg.size ?? 0,
+    };
+  }
+
+  /**
+   * List the newest messages across one or more mailboxes (a single folder, or every account's
+   * INBOX for the unified view), merged by date with per-source cursors.
+   */
+  async listMessages(
+    userId: string,
+    sources: ListSource[],
+    rawCursor: string | null,
+    limit: number,
+    search: SearchQuery | null,
+  ): Promise<MessageListResponse> {
+    const previous = decodeCursor(rawCursor);
+    const errors: MessageListResponse['errors'] = [];
+    const pages = (
+      await Promise.all(
+        sources.map(async (s) => {
+          try {
+            return await this.fetchSourcePage(userId, s, previous[sourceKey(s)], limit, search);
+          } catch (err) {
+            errors.push({ accountId: s.accountId, error: describeError(err, 'IMAP').message });
+            return null;
+          }
+        }),
+      )
+    ).filter((p): p is SourcePage => p !== null);
+
+    const reset = pages.some((p) => p.reset) && rawCursor !== null;
+    const { picked, cursor, more } = mergePages(pages, limit, previous);
+    // Sources that failed keep their previous cursor so a later page can retry them.
+    for (const s of sources) {
+      const k = sourceKey(s);
+      if (!cursor[k] && previous[k]) cursor[k] = previous[k];
+    }
+    const snippets = await this.snippets(userId, picked);
+    return {
+      messages: picked.map((it) => this.toSummary(it, snippets.get(it) ?? '')),
+      cursor: more ? encodeCursor(cursor) : null,
+      errors,
+      reset,
+    };
+  }
+
+  // ---- single message ------------------------------------------------------
+
+  private checkValidity(mailbox: { uidValidity: bigint }, ref: MessageRef) {
+    if (mailbox.uidValidity.toString() !== ref.uidValidity) {
+      throw new StaleError('The folder changed on the server (UIDVALIDITY). Reload the message list.');
+    }
+  }
+
+  async fetchRaw(
+    userId: string,
+    ref: MessageRef,
+    maxBytes: number,
+  ): Promise<{ raw: Buffer; flags: Set<string>; internalDate: Date | null }> {
+    return this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox) => {
+      this.checkValidity(mailbox, ref);
+      const meta = await client.fetchOne(String(ref.uid), { uid: true, flags: true, internalDate: true, size: true }, { uid: true });
+      if (!meta) throw new MessageGoneError('Message not found');
+      if ((meta.size ?? 0) > maxBytes) {
+        throw new MailServerError(`Message is too large to display (${Math.round((meta.size ?? 0) / 1048576)} MB)`, 'protocol');
+      }
+      // `source` is fetched with BODY.PEEK, so reading never sets \Seen implicitly.
+      const full = await client.fetchOne(String(ref.uid), { uid: true, source: true }, { uid: true });
+      if (!full || !full.source) throw new MessageGoneError('Message not found');
+      return { raw: full.source, flags: meta.flags ?? new Set(), internalDate: toDate(meta.internalDate) };
+    });
+  }
+
+  async getMessage(
+    userId: string,
+    ref: MessageRef,
+    opts: { allowRemote: boolean; proxyUrl: (u: string) => string; maxBytes: number },
+  ): Promise<MessageDetail> {
+    const { raw, flags, internalDate } = await this.fetchRaw(userId, ref, opts.maxBytes);
+    const email = await parseRaw(raw);
+    return buildMessageDetail(
+      email,
+      { ...ref, flags, internalDate },
+      { allowRemote: opts.allowRemote, proxyUrl: opts.proxyUrl },
+    );
+  }
+
+  async getParsed(userId: string, ref: MessageRef, maxBytes: number): Promise<ParsedEmail> {
+    const { raw } = await this.fetchRaw(userId, ref, maxBytes);
+    return parseRaw(raw);
+  }
+
+  async getAttachment(userId: string, ref: MessageRef, index: number, maxBytes: number) {
+    const email = await this.getParsed(userId, ref, maxBytes);
+    const att = email.attachments[index];
+    if (!att) throw new MessageGoneError('Attachment not found');
+    return {
+      filename: att.filename || `attachment-${index + 1}`,
+      mimeType: att.mimeType || 'application/octet-stream',
+      content: attachmentBytes(att),
+    };
+  }
+
+  // ---- actions ---------------------------------------------------------------
+
+  /** Apply an action to messages that all live in the same account and folder. */
+  async applyAction(userId: string, accountId: string, folder: string, uidValidity: string, uids: number[], action: MessageAction) {
+    if (uids.length === 0) return;
+    const range = uids.join(',');
+    const ref = { accountId, folder, uid: 0, uidValidity };
+
+    let destination: string | null = null;
+    let expunge = false;
+    if (action.type === 'move') destination = action.destination;
+    if (action.type === 'archive') {
+      destination = await this.specialFolder(userId, accountId, 'archive');
+      if (!destination) throw new MailServerError('This account has no Archive folder', 'protocol');
+    }
+    if (action.type === 'delete') {
+      const trash = await this.specialFolder(userId, accountId, 'trash');
+      // Only messages already in Trash are permanently removed; everything else moves to Trash.
+      if (trash && trash !== folder) destination = trash;
+      else if (trash === folder) expunge = true;
+      else throw new MailServerError('This account has no Trash folder', 'protocol');
+    }
+    if (destination === folder) return;
+
+    await this.pool.withMailbox(userId, accountId, folder, async (client: ImapFlow, mailbox) => {
+      this.checkValidity(mailbox, ref);
+      switch (action.type) {
+        case 'seen':
+          await (action.value ? client.messageFlagsAdd(range, ['\\Seen'], { uid: true }) : client.messageFlagsRemove(range, ['\\Seen'], { uid: true }));
+          break;
+        case 'flagged':
+          await (action.value ? client.messageFlagsAdd(range, ['\\Flagged'], { uid: true }) : client.messageFlagsRemove(range, ['\\Flagged'], { uid: true }));
+          break;
+        default:
+          if (expunge) await client.messageDelete(range, { uid: true });
+          else if (destination) await client.messageMove(range, destination, { uid: true });
+      }
+    });
+  }
+
+  /** Mark the message a reply/forward refers to as \Answered (best effort). */
+  async markAnswered(userId: string, ref: MessageRef) {
+    try {
+      await this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox) => {
+        if (mailbox.uidValidity.toString() !== ref.uidValidity) return;
+        await client.messageFlagsAdd(String(ref.uid), ['\\Answered'], { uid: true });
+      });
+    } catch {
+      /* not critical */
+    }
+  }
+
+  async append(userId: string, accountId: string, folder: string, raw: Buffer, flags: string[]) {
+    return this.pool.withClient(userId, accountId, (client) => client.append(folder, raw, flags));
+  }
+
+  async deleteDraft(userId: string, ref: MessageRef) {
+    await this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox) => {
+      if (mailbox.uidValidity.toString() !== ref.uidValidity) return;
+      await client.messageDelete(String(ref.uid), { uid: true });
+    });
+  }
+}
