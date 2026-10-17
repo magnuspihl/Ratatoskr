@@ -8,7 +8,7 @@ import { findTextPart, hasAttachments, snippetFromPart } from '../src/imap/snipp
 
 const fixture = (name: string) => fs.readFileSync(path.join(import.meta.dirname, 'fixtures', 'mime', name));
 const meta = { accountId: 'a1', folder: 'INBOX', uid: 42, uidValidity: '7', flags: new Set(['\\Seen']), internalDate: null };
-const opts = { allowRemote: false, proxyUrl: (u: string) => `/api/proxy/image?u=${encodeURIComponent(u)}` };
+const opts = { allowRemote: false, resolveRemote: () => null };
 
 describe('MIME parsing', () => {
   it('parses headers, encoded words and addresses', async () => {

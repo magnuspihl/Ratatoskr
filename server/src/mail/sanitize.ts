@@ -1,7 +1,7 @@
 import { Parser } from 'htmlparser2';
 import sanitizeHtml from 'sanitize-html';
 import type { HtmlStyle } from '../../../shared/types.js';
-import { proxyableUrl } from '../net/imageProxy.js';
+import { fetchableImageUrl } from '../net/remoteImages.js';
 import { countRules, sanitizeInlineStyle, sanitizeStylesheet } from './css.js';
 
 /**
@@ -9,13 +9,13 @@ import { countRules, sanitizeInlineStyle, sanitizeStylesheet } from './css.js';
  *
  * Defence in depth, outermost first:
  *  1. The browser renders the result in an <iframe sandbox> with neither allow-scripts nor
- *     allow-same-origin, plus a CSP that forbids scripts, forms, frames and any network access
- *     other than the app's own image proxy.
+ *     allow-same-origin, plus a CSP that forbids scripts, forms, frames and every network
+ *     request (images may only be data: URIs).
  *  2. This module removes everything that isn't plain formatting: scripts, event handlers, forms,
  *     frames, objects, SVG/MathML, meta/link/base, comments, javascript:/data: links, CSS
  *     expressions, @import, and any remote URL (img src, background, CSS url()).
- *  3. Remote images are only re-inserted on request, rewritten to the signed server-side proxy so
- *     the sender never sees the reader's IP address or cookies.
+ *  3. Remote images are only re-inserted on request, fetched by the server (SSRF-guarded) and
+ *     inlined as data: URIs, so the sender never sees the reader's IP address or cookies.
  */
 
 const ALLOWED_TAGS = [
@@ -61,12 +61,17 @@ const NON_TEXT_TAGS = [
 
 const SAFE_LINK = /^(https?:|mailto:|tel:)/i;
 const SAFE_DATA_IMAGE = /^data:image\/(png|jpe?g|gif|webp|avif|bmp);base64,[a-z0-9+/=\s]+$/i;
+/** What the server-side image fetcher may produce (raster types only, never SVG). */
+const SAFE_INLINED_IMAGE = /^data:image\/(png|jpe?g|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon);base64,[A-Za-z0-9+/=]+$/;
 
 export interface SanitizeOptions {
-  /** Load remote images through the proxy (true) or strip them (false, default). */
+  /** Show remote images (inlined by the server) or strip them (false, default). */
   allowRemote: boolean;
-  /** Build a proxy URL for a remote resource. */
-  proxyUrl: (url: string) => string;
+  /**
+   * Turn a remote http(s) URL into an inline data: URI fetched by the server, or null to drop it.
+   * The result never contains a network URL, so the rendered message makes no requests at all.
+   */
+  resolveRemote: (url: string) => string | null;
   /** Resolve a cid: reference (without the "cid:" prefix) to a data: URL, or null. */
   resolveCid: (cid: string) => string | null;
 }
@@ -76,7 +81,7 @@ export interface SanitizedHtml {
   html: string;
   /** Sanitized stylesheet collected from the message's <style> elements. */
   css: string;
-  /** Number of remote resources removed (0 when allowRemote is true). */
+  /** Number of remote resources not shown (blocked, or failed to load when allowed). */
   remoteBlocked: number;
   style: HtmlStyle;
 }
@@ -123,7 +128,8 @@ export function sanitizeEmailHtml(input: string, opts: SanitizeOptions): Sanitiz
     if (/^cid:/i.test(src)) return opts.resolveCid(src.slice(4));
     if (SAFE_DATA_IMAGE.test(src)) return src.replace(/\s+/g, '');
     if (/^https?:\/\//i.test(src)) {
-      if (opts.allowRemote && proxyableUrl(src)) return opts.proxyUrl(src);
+      const inlined = opts.allowRemote && fetchableImageUrl(src) ? opts.resolveRemote(src) : null;
+      if (inlined && SAFE_INLINED_IMAGE.test(inlined)) return inlined;
       remoteBlocked++;
       return null;
     }
@@ -139,9 +145,10 @@ export function sanitizeEmailHtml(input: string, opts: SanitizeOptions): Sanitiz
   const html = sanitizeHtml(input, {
     allowedTags: ALLOWED_TAGS,
     allowedAttributes: ALLOWED_ATTRS,
-    // URL attributes are validated in transformTags below; this is a second line of defence.
+    // URL attributes are validated in transformTags below; this is a second line of defence:
+    // image sources and backgrounds can only ever be inline data: URIs, never network URLs.
     allowedSchemes: ['http', 'https', 'mailto', 'tel'],
-    allowedSchemesByTag: { img: ['http', 'https', 'data'] },
+    allowedSchemesByTag: { img: ['data'], table: ['data'], td: ['data'], th: ['data'], tr: ['data'], div: ['data'] },
     allowedSchemesAppliedToAttributes: ['href', 'src', 'cite', 'background'],
     allowProtocolRelative: false,
     allowedStyles: undefined,
@@ -198,4 +205,21 @@ export function sanitizeEmailHtml(input: string, opts: SanitizeOptions): Sanitiz
   const style: HtmlStyle = designSignals >= 3 ? 'designed' : 'simple';
 
   return { html, css, remoteBlocked, style };
+}
+
+/**
+ * The remote image URLs a message would load if remote content were allowed (in img src,
+ * background attributes and CSS url()), normalised exactly as the sanitizer will look them up.
+ */
+export function collectRemoteImageUrls(html: string): string[] {
+  const urls: string[] = [];
+  sanitizeEmailHtml(html, {
+    allowRemote: true,
+    resolveCid: () => null,
+    resolveRemote: (u) => {
+      urls.push(u);
+      return null;
+    },
+  });
+  return [...new Set(urls)];
 }

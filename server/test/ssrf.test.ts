@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assertPublicHost, isPublicAddress } from '../src/net/ssrf.js';
-import { fetchRemoteImage, proxyableUrl, signProxyUrl, verifyProxySignature } from '../src/net/imageProxy.js';
-import { Keyring } from '../src/crypto.js';
+import { fetchableImageUrl, fetchRemoteImage } from '../src/net/remoteImages.js';
 
 describe('isPublicAddress', () => {
   it.each([
@@ -24,16 +23,16 @@ describe('assertPublicHost', () => {
   });
 });
 
-describe('image proxy', () => {
+describe('remote image fetcher', () => {
   it('only accepts http(s) URLs on default ports without credentials', () => {
-    expect(proxyableUrl('https://img.example.com/a.png')).not.toBeNull();
-    expect(proxyableUrl('http://img.example.com:80/a.png')).not.toBeNull();
-    expect(proxyableUrl('https://img.example.com:8443/a.png')).toBeNull();
-    expect(proxyableUrl('http://img.example.com:6379/')).toBeNull();
-    expect(proxyableUrl('https://user:pw@img.example.com/a.png')).toBeNull();
-    expect(proxyableUrl('file:///etc/passwd')).toBeNull();
-    expect(proxyableUrl('gopher://img.example.com/')).toBeNull();
-    expect(proxyableUrl('data:image/png;base64,AAAA')).toBeNull();
+    expect(fetchableImageUrl('https://img.example.com/a.png')).not.toBeNull();
+    expect(fetchableImageUrl('http://img.example.com:80/a.png')).not.toBeNull();
+    expect(fetchableImageUrl('https://img.example.com:8443/a.png')).toBeNull();
+    expect(fetchableImageUrl('http://img.example.com:6379/')).toBeNull();
+    expect(fetchableImageUrl('https://user:pw@img.example.com/a.png')).toBeNull();
+    expect(fetchableImageUrl('file:///etc/passwd')).toBeNull();
+    expect(fetchableImageUrl('gopher://img.example.com/')).toBeNull();
+    expect(fetchableImageUrl('data:image/png;base64,AAAA')).toBeNull();
   });
 
   it('refuses to fetch internal addresses (no request is made)', async () => {
@@ -42,14 +41,5 @@ describe('image proxy', () => {
     await expect(fetchRemoteImage('http://169.254.169.254/latest/meta-data/')).rejects.toThrow(/internal/);
     await expect(fetchRemoteImage('http://[::1]/x.png')).rejects.toThrow(/internal/);
     await expect(fetchRemoteImage('http://[::ffff:7f00:1]/x.png')).rejects.toThrow(/internal/);
-  });
-
-  it('signs URLs per user', () => {
-    const key = new Keyring('a-fake-test-secret-that-is-long-enough-1234').signingKey;
-    const url = signProxyUrl(key, 'user-1', 'https://img.example.com/a.png');
-    const params = new URL(url, 'https://mail.example.com').searchParams;
-    expect(verifyProxySignature(key, 'user-1', params.get('u')!, params.get('s')!)).toBe(true);
-    expect(verifyProxySignature(key, 'user-2', params.get('u')!, params.get('s')!)).toBe(false);
-    expect(verifyProxySignature(key, 'user-1', 'https://img.example.com/b.png', params.get('s')!)).toBe(false);
   });
 });

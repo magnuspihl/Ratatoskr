@@ -3,8 +3,9 @@
  *
  * The iframe is created with `sandbox="allow-popups allow-popups-to-escape-sandbox"`: no scripts,
  * no same-origin access, no forms, no top navigation. The CSP below is a second, independent
- * layer: even if markup slipped through sanitization, nothing may load except inline styles,
- * data: images and the app's own signed image proxy.
+ * layer: even if markup slipped through sanitization, nothing may load except inline styles and
+ * data: images. The frame makes no network requests at all (remote images, when allowed, are
+ * fetched by the server and inlined), so it also works behind cookie-based auth proxies.
  */
 
 export type RenderMode = 'light' | 'dark' | 'paper';
@@ -21,15 +22,13 @@ export interface SrcdocInput {
   html: string;
   css: string;
   mode: RenderMode;
-  /** Origin of the app, e.g. "https://mail.example.com" (for the image proxy CSP source). */
-  origin: string;
   palette: RenderPalette;
 }
 
-export function contentSecurityPolicy(origin: string): string {
+export function contentSecurityPolicy(): string {
   return [
     "default-src 'none'",
-    `img-src data: ${origin}/api/proxy/image`,
+    'img-src data:',
     "style-src 'unsafe-inline'",
     'font-src data:',
     "form-action 'none'",
@@ -54,7 +53,8 @@ html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; padding: 20px 24px; font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   word-wrap: break-word; overflow-wrap: anywhere; }
 img { max-width: 100%; height: auto; }
-img:not([src]) { display: inline-block; min-width: 1px; min-height: 1px; }
+/* Images that were blocked or couldn't be loaded keep their size as a neutral placeholder. */
+img:not([src]) { display: inline-block; min-width: 1px; min-height: 1px; background: rgba(128, 128, 128, 0.12); }
 pre { white-space: pre-wrap; }
 blockquote { margin: 0.5em 0 0.5em 0.25em; padding-left: 0.9em; border-left: 3px solid ${color(p.border)}; }
 table { max-width: 100%; }`;
@@ -75,10 +75,10 @@ a { color: #1a5fd0; }`;
 }
 
 export function buildSrcdoc(input: SrcdocInput): string {
-  const { html, css, mode, origin, palette } = input;
+  const { html, css, mode, palette } = input;
   // Message styles first, viewer styles last so the dark override wins where intended.
   return `<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${escapeAttr(contentSecurityPolicy(origin))}">
+<meta http-equiv="Content-Security-Policy" content="${escapeAttr(contentSecurityPolicy())}">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="${mode === 'dark' ? 'dark' : 'light'}">
 <style>${baseCss(palette)}</style>

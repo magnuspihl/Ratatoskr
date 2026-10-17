@@ -241,8 +241,16 @@ describe('reading', () => {
     const again = await listAll(`accountId=${accounts.alice!.id}&folder=INBOX&q=newest`);
     expect(again[0]!.seen).toBe(false);
 
+    // With remote content allowed the server fetches images itself and inlines them; the browser
+    // never gets a network URL. This fake tracker host can't be fetched, so it becomes a
+    // placeholder and is reported as not loaded.
     const withImages = (await api<MessageDetail>('GET', `/api/message?${q}&remote=1`)).json;
-    expect(withImages.html).toContain('/api/proxy/image?u=https%3A%2F%2Ftracker.example.com%2Fpixel.gif');
+    expect(withImages.remoteContentLoaded).toBe(true);
+    expect(withImages.html).not.toMatch(/https?:\/\/|\/api\//);
+    expect(withImages.remoteContentBlocked).toBe(1);
+
+    // The old image proxy endpoint is gone.
+    expect((await ctx.app.inject({ method: 'GET', url: '/api/proxy/image?u=x', headers: { cookie } })).statusCode).toBe(404);
   });
 
   it('reports a stale UIDVALIDITY as 409', async () => {

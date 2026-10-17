@@ -23,7 +23,8 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 - Message list with sender, subject, snippet, date, unread/flagged/answered/attachment
   indicators, and an account colour tag in the unified view.
 - Reading plain text and HTML, with inline (`cid:`) images and attachment downloads. Remote
-  images are blocked by default; "Load images" fetches them through a privacy proxy.
+  images are blocked by default; "Load images" has the server fetch them and embed them in the
+  message, so the sender never sees your IP address.
 - Mark read/unread, flag, move, archive, delete (to Trash, expunge only from Trash), multi-select.
 - Compose, reply, reply-all, and forward (with the original attachments). Includes a light
   rich-text editor, an automatic plain-text alternative, attachments, drafts (saved to the
@@ -134,15 +135,19 @@ Every message is assumed to be hostile.
   `http`/`https`/`mailto`/`tel` and open in a new tab with `noopener noreferrer`.
 - The result is rendered in an `<iframe sandbox>` **without** `allow-scripts` and
   `allow-same-origin`. That gives it an opaque origin, so it can't reach the app, its cookies or
-  storage. A strict Content-Security-Policy inside the frame blocks scripts, forms, frames and
-  every network request except the app's own image proxy.
-- **Remote content is blocked by default.** "Load images" rewrites remote URLs to a signed
-  server-side proxy, so senders never see the reader's IP address, cookies or referrer. The proxy
-  only fetches `http(s)` on ports 80/443. It resolves DNS itself and refuses
-  loopback/private/link-local/CGNAT/ULA/multicast/reserved addresses, including IPv4-mapped
-  IPv6 and IP literals. It connects to the address it checked (no DNS-rebinding window),
-  re-checks every redirect, and only returns raster image types (no SVG) with
-  `nosniff` and a sandbox CSP.
+  storage. A strict Content-Security-Policy inside the frame (`default-src 'none'; img-src data:`)
+  blocks scripts, forms, frames and **every** network request: the rendered message never
+  contacts any server, which also means it works behind cookie-based auth proxies.
+- **Remote content is blocked by default.** "Load images" makes the server download the images
+  (`<img>`, `background=` and CSS `url()`) and embed them as `data:` URIs, so senders never see the
+  reader's IP address, cookies or referrer. The fetcher only fetches `http(s)` on ports 80/443.
+  It resolves DNS itself and refuses loopback/private/link-local/CGNAT/ULA/multicast/reserved
+  addresses, including IPv4-mapped IPv6 and IP literals. It connects to the address it checked
+  (no DNS-rebinding window), re-checks every redirect, and only accepts raster image types (no
+  SVG). Limits per message: 6 parallel fetches, 10 MB per image, 15 MB and 100 images in total,
+  and a 20 s budget. Anything over a limit, failing or blocked is left out, keeping its size and
+  alt text as a placeholder. Fetched images sit in a small in-memory cache (per user, 10
+  minutes, 64 MB) so toggling or reopening a message doesn't download them again.
 - `cid:` images are inlined as `data:` URLs. Attachments are always served as downloads
   (`Content-Disposition: attachment`, `application/octet-stream`, `nosniff`, sandbox CSP).
 - The app sends a strict CSP (`script-src 'self'`), `frame-ancestors 'none'`, `nosniff`,
@@ -187,7 +192,7 @@ server/src
   imap/mail.ts      Folders, unified listing (k-way merge with per-account UID cursors), actions
   mail/sanitize.ts  HTML sanitizer; mail/css.ts CSS sanitizer
   mail/compose.ts   MIME building (Nodemailer MailComposer); mail/send.ts SMTP + Sent/Drafts
-  net/              SSRF guards and the remote image proxy
+  net/              SSRF guards and the server-side remote image fetcher
 shared/             Types and the sandboxed iframe document builder (used by both sides)
 web/src             React + TanStack Query client
 ```

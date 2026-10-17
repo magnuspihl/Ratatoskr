@@ -10,12 +10,12 @@ function palette(): RenderPalette {
 /**
  * Renders sanitized message HTML in a sandboxed iframe: no scripts, opaque origin (no access to
  * the app, its cookies or storage), no forms, no top navigation. Links open in a new tab
- * (allow-popups) without an opener. A CSP inside the document blocks every network request except
- * the app's signed image proxy.
+ * (allow-popups) without an opener. A CSP inside the document blocks every network request;
+ * remote images, when allowed, arrive already inlined as data: URIs.
  */
 export function MessageFrame({ html, css, mode, themeKey }: { html: string; css: string; mode: RenderMode; themeKey: string }) {
   const srcDoc = useMemo(
-    () => buildSrcdoc({ html, css, mode, origin: window.location.origin, palette: palette() }),
+    () => buildSrcdoc({ html, css, mode, palette: palette() }),
     // themeKey forces a rebuild when the app theme changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [html, css, mode, themeKey],

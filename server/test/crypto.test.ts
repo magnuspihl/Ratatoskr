@@ -48,7 +48,6 @@ describe('AES-256-GCM helpers', () => {
   it('derives independent subkeys', () => {
     const k = new Keyring(secret());
     expect(k.credentialKey.equals(k.sessionKey)).toBe(false);
-    expect(k.sessionKey.equals(k.signingKey)).toBe(false);
   });
 
   it('refuses short master secrets', () => {

@@ -86,7 +86,7 @@ export async function buildApp(config: Config, opts: { store?: Store; logger?: b
   app.get('/healthz', async () => ({ ok: true }));
 
   await registerAuthRoutes(app, config, store, sessions);
-  await registerApiRoutes(app, { config, store, keyring, sessions, pool, mail, compose });
+  await registerApiRoutes(app, { config, store, sessions, pool, mail, compose });
   await registerWebSocket(app, config, store, sessions, pool);
 
   // Static frontend (production build). In development Vite serves the UI and proxies /api.

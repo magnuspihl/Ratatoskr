@@ -13,6 +13,8 @@ import type {
   UndoInfo,
 } from '../../../shared/types.js';
 import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
+import { collectRemoteImageUrls } from '../mail/sanitize.js';
+import { inlineRemoteImages, type RemoteImageCache } from '../net/remoteImages.js';
 import { MailServerError, describeError } from './connect.js';
 import type { ImapPool } from './pool.js';
 import { findTextPart, hasAttachments, SNIPPET_FETCH_BYTES, snippetFromPart, type TextPart } from './snippet.js';
@@ -410,14 +412,19 @@ export class MailService {
   async getMessage(
     userId: string,
     ref: MessageRef,
-    opts: { allowRemote: boolean; proxyUrl: (u: string) => string; maxBytes: number },
+    opts: { allowRemote: boolean; maxBytes: number; imageCache?: RemoteImageCache },
   ): Promise<MessageDetail> {
     const { raw, flags, internalDate } = await this.fetchRaw(userId, ref, opts.maxBytes);
     const email = await parseRaw(raw);
+    // Remote images are fetched here and inlined as data: URIs; the browser never fetches them.
+    let inlined = new Map<string, string | null>();
+    if (opts.allowRemote && email.html) {
+      inlined = await inlineRemoteImages(collectRemoteImageUrls(email.html), { userId, cache: opts.imageCache });
+    }
     return buildMessageDetail(
       email,
       { ...ref, flags, internalDate },
-      { allowRemote: opts.allowRemote, proxyUrl: opts.proxyUrl },
+      { allowRemote: opts.allowRemote, resolveRemote: (u) => inlined.get(u) ?? null },
     );
   }
 

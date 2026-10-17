@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { sanitizeEmailHtml, type SanitizeOptions } from '../src/mail/sanitize.js';
+import { collectRemoteImageUrls, sanitizeEmailHtml, type SanitizeOptions } from '../src/mail/sanitize.js';
 import { sanitizeInlineStyle, sanitizeStylesheet } from '../src/mail/css.js';
 import { buildSrcdoc } from '../../shared/srcdoc.js';
 
@@ -10,16 +10,18 @@ const fixture = (name: string) => fs.readFileSync(path.join(FIXTURES, name), 'ut
 
 const PNG_1PX = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
+/** Pretend server-side fetcher: every remote image "downloads" as the same tiny PNG. */
+const INLINED = `data:image/png;base64,${PNG_1PX}`;
 const blocked: SanitizeOptions = {
   allowRemote: false,
-  proxyUrl: (u) => `/api/proxy/image?u=${encodeURIComponent(u)}&s=sig`,
+  resolveRemote: () => INLINED,
   resolveCid: (cid) => (cid === 'logo@example.com' ? `data:image/png;base64,${PNG_1PX}` : null),
 };
 const allowed: SanitizeOptions = { ...blocked, allowRemote: true };
 
 /** Everything that must never appear in sanitized output, whatever the input. */
 function assertInert(html: string, css: string) {
-  const all = `${html}\n${css}`;
+  const all = `${html}\n${css}`.replace(/&quot;/g, '"').replace(/&#39;/g, "'");
   expect(all).not.toMatch(/<script/i);
   expect(all).not.toMatch(/\son[a-z]+\s*=/i);
   expect(all).not.toMatch(/javascript:/i);
@@ -29,10 +31,12 @@ function assertInert(html: string, css: string) {
   expect(all).not.toMatch(/@import/i);
   expect(all).not.toMatch(/-moz-binding|behavior\s*:/i);
   expect(css).not.toMatch(/<\/style/i);
-  // No direct remote references: every http(s) URL must go through the proxy.
-  const withoutProxy = all.replace(/\/api\/proxy\/image\?u=[^"'\s)]+/g, '');
-  expect(withoutProxy).not.toMatch(/(src|href|background)\s*=\s*["']?(https?:)?\/\/(?!ok\.example\.com)[^"'\s>]*/i);
-  expect(withoutProxy).not.toMatch(/url\(\s*["']?(https?:)?\/\//i);
+  // No network references for resources at all: images and backgrounds are data: URIs or gone.
+  // (Only links may point to the web.)
+  expect(all).not.toMatch(/\b(src|background)\s*=\s*(?!["']?data:)["']?[a-z]*:?\/\//i);
+  expect(all).not.toMatch(/\b(src|background)\s*=\s*["']?\//i);
+  expect(all).not.toMatch(/url\(\s*(?!["']?data:)/i);
+  expect(all).not.toMatch(/href\s*=\s*["']?(https?:)?\/\/(?!ok\.example\.com)/i);
 }
 
 describe('sanitizeEmailHtml: hostile fixtures', () => {
@@ -94,8 +98,7 @@ describe('sanitizeEmailHtml: specific behaviour', () => {
       html: out.html,
       css: out.css,
       mode: 'light',
-      origin: 'https://mail.example.com',
-      palette: { background: '#000', text: '#fff', muted: '#888', link: '#09f', border: '#333' },
+            palette: { background: '#000', text: '#fff', muted: '#888', link: '#09f', border: '#333' },
     });
     expect(doc.match(/<script/gi)).toBeNull();
     expect(doc.match(/<\/style>/gi)?.length).toBe(doc.match(/<style>/gi)?.length);
@@ -110,13 +113,52 @@ describe('sanitizeEmailHtml: specific behaviour', () => {
     expect(out.html).not.toContain('srcset');
   });
 
-  it('routes remote images through the proxy when allowed (never direct)', () => {
+  it('inlines remote images as data: URIs when allowed, never as network URLs', () => {
     const out = sanitizeEmailHtml(fixture('remote-pixels.html'), allowed);
-    expect(out.html).toContain(`src="/api/proxy/image?u=${encodeURIComponent('https://tracker.example.com/open.gif?id=123').replace(/&/g, '&amp;')}`);
-    expect(out.html).toContain(encodeURIComponent('https://tracker.example.com/protocol-relative.gif'));
-    expect(out.html).toContain('background="/api/proxy/image');
-    // Non-standard ports are not proxied.
-    expect(out.html).not.toContain(encodeURIComponent('tracker.example.com:8443'));
+    expect(out.html).not.toContain('tracker.example.com');
+    expect(out.html).toContain(`src="${INLINED}"`);
+    expect(out.html).toContain(`background="${INLINED}"`);
+    // Non-standard ports are never fetched: counted as not shown.
+    expect(out.remoteBlocked).toBe(1);
+  });
+
+  it('inlines CSS url() backgrounds and drops the declaration if an image fails', () => {
+    const html = `<style>.hero { background-image: url(https://img.example.com/hero.png); color: red }</style>
+      <div style="background: url('https://img.example.com/bg.png') no-repeat; padding: 4px">x</div>`;
+    const ok = sanitizeEmailHtml(html, allowed);
+    expect(ok.css).toContain(`url("${INLINED}")`);
+    expect(ok.html).toContain(`url(&quot;${INLINED}&quot;)`);
+    expect(`${ok.html}${ok.css}`).not.toContain('img.example.com');
+    const failing = sanitizeEmailHtml(html, { ...allowed, resolveRemote: () => null });
+    expect(`${failing.html}${failing.css}`).not.toMatch(/url\(/);
+    expect(failing.css).toContain('color: red');
+    expect(failing.html).toContain('padding: 4px');
+    expect(failing.remoteBlocked).toBe(2);
+  });
+
+  it('never trusts the resolver with anything but raster data: URIs', () => {
+    for (const evil of ['https://img.example.com/a.png', '/api/anything', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:text/html;base64,PGI+', 'javascript:alert(1)']) {
+      const out = sanitizeEmailHtml('<img src="https://img.example.com/a.png" alt="A" width="40" height="20">', { ...allowed, resolveRemote: () => evil });
+      expect(out.html).toBe('<img alt="A" width="40" height="20" />');
+      expect(out.remoteBlocked).toBe(1);
+    }
+  });
+
+  it('keeps alt text and size of images that are not shown (placeholder)', () => {
+    const out = sanitizeEmailHtml('<img src="https://img.example.com/a.png" alt="Logo" width="120" height="40">', { ...allowed, resolveRemote: () => null });
+    expect(out.html).toBe('<img alt="Logo" width="120" height="40" />');
+  });
+
+  it('collects every remote image URL the message would load', () => {
+    expect(collectRemoteImageUrls(fixture('remote-pixels.html')).sort()).toEqual(
+      [
+        'http://tracker.example.com/plain.gif',
+        'https://tracker.example.com/open.gif?id=123',
+        'https://tracker.example.com/protocol-relative.gif',
+        'https://tracker.example.com/table-bg.png',
+        'https://tracker.example.com/td-bg.png',
+      ].sort(),
+    );
   });
 
   it('removes forms and inputs', () => {
@@ -174,10 +216,10 @@ describe('css sanitizer', () => {
 
 describe('iframe document', () => {
   const palette = { background: '#111', text: '#eee', muted: '#888', link: '#09f', border: '#333' };
-  it('carries a strict CSP that only allows the image proxy', () => {
-    const doc = buildSrcdoc({ html: '<p>x</p>', css: '', mode: 'dark', origin: 'https://mail.example.com', palette });
-    expect(doc).toContain(`http-equiv="Content-Security-Policy" content="default-src 'none'`);
-    expect(doc).toContain('img-src data: https://mail.example.com/api/proxy/image');
+  it('carries a strict CSP that allows no network requests at all', () => {
+    const doc = buildSrcdoc({ html: '<p>x</p>', css: '', mode: 'dark', palette });
+    expect(doc).toContain(`http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; `);
+    expect(doc).not.toMatch(/https?:/);
     expect(doc).toContain("script-src 'none'");
     expect(doc).toContain("form-action 'none'");
     expect(doc).toContain('<meta name="referrer" content="no-referrer">');
@@ -187,8 +229,7 @@ describe('iframe document', () => {
       html: '',
       css: '',
       mode: 'dark',
-      origin: 'https://mail.example.com',
-      palette: { ...palette, background: 'red;} body{background:url(https://evil.example.com/x)' },
+            palette: { ...palette, background: 'red;} body{background:url(https://evil.example.com/x)' },
     });
     expect(doc).not.toContain('evil.example.com');
   });

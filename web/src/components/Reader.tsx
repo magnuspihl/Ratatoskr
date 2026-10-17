@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Archive,
   ArrowLeft,
@@ -82,6 +82,7 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
     setShowText(false);
   }, [key]);
 
+  const qc = useQueryClient();
   const q = useQuery({
     queryKey: ['message', key, remote],
     queryFn: () => api.message(openRef!, remote),
@@ -124,6 +125,9 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
   }
 
   const ref = openRef;
+  // Reply/forward quote the version without remote images, so downloaded remote content (e.g.
+  // tracking pixels) isn't embedded in outgoing mail.
+  const quotable = (detail: MessageDetail) => (remote ? (qc.getQueryData<MessageDetail>(['message', key, false]) ?? detail) : detail);
   const seen = d?.seen ?? true;
   const flagged = d?.flagged ?? false;
 
@@ -134,18 +138,18 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
           <ArrowLeft size={18} />
         </button>
         {isDrafts ? (
-          <button className="btn" disabled={!d} onClick={() => d && onReply('editDraft', d)}>
+          <button className="btn" disabled={!d} onClick={() => d && onReply('editDraft', quotable(d))}>
             <PenSquare size={15} /> Edit draft
           </button>
         ) : (
           <>
-            <button className="icon-btn" title="Reply (r)" disabled={!d} onClick={() => d && onReply('reply', d)}>
+            <button className="icon-btn" title="Reply (r)" disabled={!d} onClick={() => d && onReply('reply', quotable(d))}>
               <Reply size={17} />
             </button>
-            <button className="icon-btn" title="Reply all (a)" disabled={!d} onClick={() => d && onReply('replyAll', d)}>
+            <button className="icon-btn" title="Reply all (a)" disabled={!d} onClick={() => d && onReply('replyAll', quotable(d))}>
               <ReplyAll size={17} />
             </button>
-            <button className="icon-btn" title="Forward (f)" disabled={!d} onClick={() => d && onReply('forward', d)}>
+            <button className="icon-btn" title="Forward (f)" disabled={!d} onClick={() => d && onReply('forward', quotable(d))}>
               <Forward size={17} />
             </button>
           </>
@@ -206,7 +210,13 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
                     </button>
                   </>
                 ) : (
-                  <span className="grow">{remote ? 'Remote images are loaded through a privacy proxy.' : ''}</span>
+                  <span className="grow">
+                    {remote
+                      ? d.remoteContentBlocked > 0
+                        ? `${d.remoteContentBlocked} remote image${d.remoteContentBlocked === 1 ? '' : 's'} couldn't be loaded.`
+                        : 'Remote images were downloaded by the server, without revealing your address.'
+                      : ''}
+                  </span>
                 )}
                 {theme === 'dark' && !showText && (
                   <div className="segmented" title="How to display this message in dark mode">

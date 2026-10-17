@@ -49,7 +49,7 @@ export interface DetailMeta {
 
 export interface DetailOptions {
   allowRemote: boolean;
-  proxyUrl: SanitizeOptions['proxyUrl'];
+  resolveRemote: SanitizeOptions['resolveRemote'];
 }
 
 /** Turn a parsed message into the view model sent to the browser, sanitizing any HTML. */
@@ -73,7 +73,7 @@ export function buildMessageDetail(email: ParsedEmail, meta: DetailMeta, opts: D
   let htmlStyle: MessageDetail['htmlStyle'] = null;
   let remoteContentBlocked = 0;
   if (email.html) {
-    const s = sanitizeEmailHtml(email.html, { allowRemote: opts.allowRemote, proxyUrl: opts.proxyUrl, resolveCid });
+    const s = sanitizeEmailHtml(email.html, { allowRemote: opts.allowRemote, resolveRemote: opts.resolveRemote, resolveCid });
     html = s.html;
     css = s.css;
     htmlStyle = s.style;

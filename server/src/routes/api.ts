@@ -2,13 +2,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AccountInput, ActionResult, ComposePayload, Me, MessageRef } from '../../../shared/types.js';
 import type { Config } from '../config.js';
-import type { Keyring } from '../crypto.js';
 import type { Store, User } from '../db.js';
 import { MailServerError, testConnection } from '../imap/connect.js';
 import { MessageGoneError, StaleError, type ListSource, type MailService } from '../imap/mail.js';
 import { NotFoundError, type ImapPool } from '../imap/pool.js';
-import { fetchRemoteImage, ProxyError, signProxyUrl, verifyProxySignature } from '../net/imageProxy.js';
-import { BlockedAddressError } from '../net/ssrf.js';
+import { RemoteImageCache } from '../net/remoteImages.js';
 import type { Sessions } from '../auth/session.js';
 import { ComposeError, type ComposeService } from '../mail/send.js';
 
@@ -104,7 +102,6 @@ function contentDisposition(filename: string): string {
 export interface ApiDeps {
   config: Config;
   store: Store;
-  keyring: Keyring;
   sessions: Sessions;
   pool: ImapPool;
   mail: MailService;
@@ -112,14 +109,13 @@ export interface ApiDeps {
 }
 
 export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
-  const { config, store, keyring, sessions, pool, mail, compose } = deps;
+  const { config, store, sessions, pool, mail, compose } = deps;
 
   app.decorateRequest('user', null);
 
-  // Authentication + CSRF protection for the whole /api namespace (except the image proxy, which
-  // is authorised by its URL signature because the sandboxed message iframe has no cookies).
+  // Authentication + CSRF protection for the whole /api namespace.
   app.addHook('preHandler', async (req, reply) => {
-    if (!req.url.startsWith('/api/') || req.url.startsWith('/api/proxy/')) return;
+    if (!req.url.startsWith('/api/')) return;
     const session = sessions.read(req);
     const user = session ? store.getUser(session.uid) : null;
     if (!user) return reply.code(401).send({ error: 'Not logged in' });
@@ -136,7 +132,8 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
   const requireAccount = (userId: string, accountId: string) => {
     if (!ownsAccount(userId, accountId)) throw new NotFoundError('Account not found');
   };
-  const proxyUrl = (userId: string) => (u: string) => signProxyUrl(keyring.signingKey, userId, u);
+  // Fetched remote images, shared across requests (per-user keys, short TTL, size-capped).
+  const imageCache = new RemoteImageCache();
 
   // ---- me / preferences -----------------------------------------------------
 
@@ -257,7 +254,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       requireAccount(uid(req), q.accountId);
       const detail = await mail.getMessage(uid(req), q, {
         allowRemote: q.remote === '1',
-        proxyUrl: proxyUrl(uid(req)),
+        imageCache,
         maxBytes: config.maxMessageBytes,
       });
       reply.header('cache-control', 'private, no-store');
@@ -356,27 +353,5 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
   app.get('/api/recipients', async (req) => {
     const q = z.object({ q: z.string().max(200).default('') }).parse(req.query);
     return store.searchRecipients(uid(req), q.q);
-  });
-
-  // ---- remote image proxy -----------------------------------------------------------------
-
-  app.get('/api/proxy/image', async (req, reply) => {
-    const q = z.object({ u: z.string().max(4096), uid: z.string().max(64), s: z.string().max(128) }).safeParse(req.query);
-    if (!q.success || !verifyProxySignature(keyring.signingKey, q.data.uid, q.data.u, q.data.s)) {
-      return reply.code(403).send({ error: 'Invalid signature' });
-    }
-    if (!store.getUser(q.data.uid)) return reply.code(403).send({ error: 'Invalid signature' });
-    try {
-      const img = await fetchRemoteImage(q.data.u);
-      return reply
-        .header('content-type', img.contentType)
-        .header('x-content-type-options', 'nosniff')
-        .header('content-security-policy', "default-src 'none'; sandbox")
-        .header('cache-control', 'private, max-age=86400')
-        .send(img.body);
-    } catch (err) {
-      const status = err instanceof ProxyError ? err.status : err instanceof BlockedAddressError ? 403 : 502;
-      return reply.code(status).send({ error: (err as Error).message });
-    }
   });
 }

@@ -8,7 +8,6 @@ import crypto from 'node:crypto';
 export class Keyring {
   readonly credentialKey: Buffer;
   readonly sessionKey: Buffer;
-  readonly signingKey: Buffer;
 
   constructor(masterSecret: string) {
     if (masterSecret.length < 32) throw new Error('Master secret must be at least 32 characters');
@@ -17,7 +16,6 @@ export class Keyring {
       Buffer.from(crypto.hkdfSync('sha256', ikm, Buffer.from('ratatoskr'), Buffer.from(info), 32));
     this.credentialKey = derive('account-credentials-v1');
     this.sessionKey = derive('session-cookie-v1');
-    this.signingKey = derive('url-signing-v1');
   }
 }
 
@@ -65,14 +63,4 @@ export function openJson<T>(key: Buffer, sealed: string | undefined, purpose: st
   } catch {
     return null;
   }
-}
-
-export function hmac(key: Buffer, data: string): string {
-  return crypto.createHmac('sha256', key).update(data).digest('base64url');
-}
-
-export function safeEqual(a: string, b: string): boolean {
-  const ab = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
 }
