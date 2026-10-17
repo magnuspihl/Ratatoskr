@@ -1,6 +1,7 @@
 import {
   Archive,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   File,
   Folder,
@@ -17,7 +18,7 @@ import {
   Layers,
   X,
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import type { AccountFolders, AccountView, FolderView, SpecialUse } from '../../../shared/types';
 import type { MailboxSel } from '../api';
 
@@ -61,27 +62,30 @@ interface Props {
 
 export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccounts, onSettings, onLogout, userLabel, onCloseNav }: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [rail, setRail] = useState(() => localStorage.getItem('navRail') === '1');
+  useEffect(() => localStorage.setItem('navRail', rail ? '1' : '0'), [rail]);
   const totalUnread = (folders ?? []).reduce((sum, a) => sum + (a.folders.find((f) => f.specialUse === 'inbox')?.unread ?? 0), 0);
 
   return (
-    <aside className="pane sidebar">
+    <aside className={`pane sidebar ${rail ? 'rail' : ''}`}>
       <div className="brand">
         <div className="brand-mark">
           <Mail size={15} />
         </div>
-        <span style={{ flex: 1 }}>Ratatoskr</span>
+        <span className="name" style={{ flex: 1 }}>Ratatoskr</span>
         <button className="icon-btn mobile-only" title="Close" onClick={onCloseNav}>
           <X size={18} />
         </button>
       </div>
-      <button className="btn primary compose-btn" onClick={onCompose} disabled={accounts.length === 0}>
-        <PenSquare size={16} /> Compose
+      <button className="btn primary compose-btn" onClick={onCompose} disabled={accounts.length === 0} title="Compose">
+        <PenSquare size={16} /> <span className="name">Compose</span>
       </button>
       <nav className="nav">
         {accounts.length > 1 && (
           <button
             className={`nav-item ${sel.accountId === null ? 'active' : ''} ${totalUnread ? 'unread' : ''}`}
             onClick={() => onSelect({ accountId: null, folder: 'INBOX' })}
+            title="All inboxes"
           >
             <Layers size={16} />
             <span className="name">All inboxes</span>
@@ -90,13 +94,17 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
         )}
         {accounts.map((acc) => {
           const af = folders?.find((f) => f.accountId === acc.id);
-          const isCollapsed = collapsed[acc.id];
+          const isCollapsed = !rail && collapsed[acc.id];
           return (
             <div className="nav-section" key={acc.id}>
-              <button className="nav-heading" onClick={() => setCollapsed((c) => ({ ...c, [acc.id]: !c[acc.id] }))}>
+              <button
+                className="nav-heading"
+                onClick={() => setCollapsed((c) => ({ ...c, [acc.id]: !c[acc.id] }))}
+                title={acc.name}
+              >
                 {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
                 <span className="dot" style={{ background: acc.color }} />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{acc.name}</span>
+                <span className="name" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{acc.name}</span>
               </button>
               {!isCollapsed && (
                 <>
@@ -111,7 +119,7 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
                           key={f.path}
                           className={`nav-item ${active ? 'active' : ''} ${showCount ? 'unread' : ''}`}
                           disabled={!f.selectable}
-                          style={{ paddingLeft: 8 + depth(f) * 14, opacity: f.selectable ? 1 : 0.6 }}
+                          style={{ paddingLeft: rail ? undefined : 8 + depth(f) * 14, opacity: f.selectable ? 1 : 0.6 }}
                           onClick={() => onSelect({ accountId: acc.id, folder: f.path })}
                           title={f.path}
                         >
@@ -128,7 +136,7 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
         })}
       </nav>
       <div className="sidebar-footer">
-        <span className="who" title={userLabel}>
+        <span className="who name" title={userLabel}>
           {userLabel}
         </span>
         <button className="icon-btn" title="Accounts" onClick={onAccounts}>
@@ -139,6 +147,13 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
         </button>
         <button className="icon-btn" title="Sign out" onClick={onLogout}>
           <LogOut size={17} />
+        </button>
+        <button
+          className="icon-btn rail-toggle desktop-only"
+          title={rail ? 'Expand sidebar' : 'Collapse sidebar'}
+          onClick={() => setRail((r) => !r)}
+        >
+          {rail ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
         </button>
       </div>
     </aside>
