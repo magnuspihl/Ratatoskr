@@ -4,6 +4,7 @@
  *   /                                     unified inbox (all accounts' INBOX)
  *   /mail/<accountId>/<folder>            a folder of one account (folder is URI-encoded)
  *   ...?q=<text>                          server-side search in that view
+ *   ...&unread=1                          only unread messages (IMAP UNSEEN, on the server)
  *   ...?open=<accountId>.<uidValidity>.<uid>
  *                                         an open message. Its folder is always the list's
  *                                         folder (INBOX in the unified view), so it isn't repeated.
@@ -24,6 +25,7 @@ export interface Route {
   accountId: string | null;
   folder: string;
   q: string;
+  unread: boolean;
   open: OpenMessage | null;
 }
 
@@ -35,7 +37,7 @@ export interface HistoryState {
   overlay?: Overlay;
 }
 
-export const HOME: Route = { accountId: null, folder: 'INBOX', q: '', open: null };
+export const HOME: Route = { accountId: null, folder: 'INBOX', q: '', unread: false, open: null };
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -51,6 +53,7 @@ function parseOpen(raw: string | null): OpenMessage | null {
 export function parseLocation(pathname: string, search: string): Route {
   const params = new URLSearchParams(search);
   const q = (params.get('q') ?? '').slice(0, 500);
+  const unread = params.get('unread') === '1';
   const open = parseOpen(params.get('open'));
   const parts = pathname.split('/').filter(Boolean);
   if (parts[0] === 'mail' && parts.length >= 3) {
@@ -64,15 +67,16 @@ export function parseLocation(pathname: string, search: string): Route {
     }
     if (!ID_RE.test(accountId) || !folder || folder.length > 1000) return { ...HOME };
     // An open message must belong to the account whose folder is shown.
-    return { accountId, folder, q, open: open && open.accountId === accountId ? open : null };
+    return { accountId, folder, q, unread, open: open && open.accountId === accountId ? open : null };
   }
-  return { accountId: null, folder: 'INBOX', q, open };
+  return { accountId: null, folder: 'INBOX', q, unread, open };
 }
 
 export function buildUrl(route: Route): string {
   const path = route.accountId ? `/mail/${encodeURIComponent(route.accountId)}/${encodeURIComponent(route.folder)}` : '/';
   const params = new URLSearchParams();
   if (route.q) params.set('q', route.q);
+  if (route.unread) params.set('unread', '1');
   if (route.open) params.set('open', `${route.open.accountId}.${route.open.uidValidity}.${route.open.uid}`);
   const qs = params.toString();
   return qs ? `${path}?${qs}` : path;
@@ -97,4 +101,9 @@ export function readHistoryState(state: unknown): HistoryState | null {
   const overlay = (state as HistoryState).overlay;
   const valid: Overlay[] = ['compose', 'settings', 'accounts', 'nav'];
   return { app: true, ...(overlay && valid.includes(overlay) ? { overlay } : {}) };
+}
+
+/** Identity of a list view (what the list shows, ignoring which message is open). */
+export function viewKey(route: Route): string {
+  return buildUrl(listRoute(route));
 }

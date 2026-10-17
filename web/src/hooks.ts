@@ -10,10 +10,10 @@ export const useAccounts = () => useQuery({ queryKey: ['accounts'], queryFn: api
 export const useFolders = (enabled: boolean) =>
   useQuery({ queryKey: ['folders'], queryFn: api.folders, enabled, staleTime: 30_000, refetchInterval: 120_000 });
 
-export function useMessages(sel: MailboxSel, q: string, enabled: boolean) {
+export function useMessages(sel: MailboxSel, q: string, unread: boolean, enabled: boolean) {
   return useInfiniteQuery({
-    queryKey: ['messages', sel.accountId, sel.accountId ? sel.folder : '', q],
-    queryFn: ({ pageParam }) => api.messages(sel, pageParam, q),
+    queryKey: ['messages', sel.accountId, sel.accountId ? sel.folder : '', q, unread],
+    queryFn: ({ pageParam }) => api.messages(sel, pageParam, q, unread),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.cursor,
     enabled,

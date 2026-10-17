@@ -1,4 +1,4 @@
-import { Archive, Flag, FolderInput, Mail, MailOpen, Menu, Paperclip, RefreshCw, Search, Star, Trash2, X, Reply } from 'lucide-react';
+import { Archive, Flag, FolderInput, Mail, MailCheck, MailOpen, Menu, Paperclip, RefreshCw, Search, Star, Trash2, X, Reply } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { AccountFolders, AccountView, MessageAction, MessageSummary, SwipeAction } from '../../../shared/types';
 import type { Direction } from '../swipe';
@@ -30,6 +30,9 @@ interface Props {
   onBulk: (action: MessageAction) => void;
   onNav: () => void;
   lastOpenKey: string | null;
+  /** Server-side "unread only" filter for this view. */
+  unreadOnly: boolean;
+  onUnreadOnly: (on: boolean) => void;
   swipeLeft: SwipeAction;
   swipeRight: SwipeAction;
   swipeRemoves: (m: MessageSummary, dir: Direction) => boolean;
@@ -95,6 +98,10 @@ export function MessageList(p: Props) {
             }}
           />
         </form>
+        <label className="check unread-toggle">
+          <input type="checkbox" checked={p.unreadOnly} onChange={(e) => p.onUnreadOnly(e.target.checked)} />
+          Unread only
+        </label>
       </div>
 
       {checkedMsgs.length > 0 && (
@@ -146,7 +153,18 @@ export function MessageList(p: Props) {
         )}
         {!p.loading && p.messages.length === 0 && !p.listError && (
           <div className="center muted" style={{ height: 160 }}>
-            {p.query ? 'No messages match your search.' : 'No messages here.'}
+            {p.unreadOnly ? (
+              <div>
+                <MailCheck size={28} style={{ opacity: 0.5 }} />
+                <div style={{ marginTop: 6 }}>
+                  {p.query ? 'No unread messages match your search.' : "You're all caught up. No unread messages here."}
+                </div>
+              </div>
+            ) : p.query ? (
+              'No messages match your search.'
+            ) : (
+              'No messages here.'
+            )}
           </div>
         )}
         {p.messages.map((m) => {
@@ -163,7 +181,7 @@ export function MessageList(p: Props) {
               removes={(d) => p.swipeRemoves(m, d)}
               confirm={(d) => p.confirmSwipe(m, d)}
               onSwipe={(d) => p.onSwipe(m, d)}
-              className={`row ${m.seen ? '' : 'unread'} ${p.openKey === key ? 'selected' : ''} ${p.lastOpenKey === key && p.openKey !== key ? 'recent' : ''} ${p.checked.has(key) ? 'checked' : ''}`}
+              className={`row ${m.seen ? '' : 'unread'} ${p.openKey === key ? 'selected' : ''} ${p.lastOpenKey === key && p.openKey !== key ? 'recent' : ''} ${p.checked.has(key) ? 'checked' : ''} ${p.unreadOnly && m.seen ? 'read-in-filter' : ''}`}
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey) p.onCheck(m, !p.checked.has(key));
                 else p.onOpen(m);

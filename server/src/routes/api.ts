@@ -227,6 +227,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
           folder: z.string().max(1000).optional(),
           cursor: z.string().max(10_000).optional(),
           q: z.string().trim().max(500).optional(),
+          unread: z.enum(['0', '1']).optional(),
           limit: z.coerce.number().int().min(1).max(200).optional(),
         })
         .parse(req.query);
@@ -240,7 +241,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
         sources = store.listAccounts(userId).map((a) => ({ accountId: a.id, folder: 'INBOX' }));
       }
       const limit = q.limit ?? req.user!.preferences.pageSize;
-      return await mail.listMessages(userId, sources, q.cursor ?? null, limit, q.q ? { text: q.q } : null);
+      return await mail.listMessages(userId, sources, q.cursor ?? null, limit, { text: q.q ?? '', unread: q.unread === '1' });
     } catch (err) {
       return sendError(reply, err);
     }

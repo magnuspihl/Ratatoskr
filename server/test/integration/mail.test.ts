@@ -548,3 +548,45 @@ describe('undo and the Archive fallback', () => {
     expect(bad.status).toBe(400);
   });
 });
+
+describe('unread only', () => {
+  const seed = async (user: string, subject: string, seen: boolean) => {
+    const c = imapClient(user);
+    await c.connect();
+    await c.append('INBOX', rawMessage({ from: BOB, to: user, subject, date: new Date(), id: subject.replace(/\W/g, '') }), seen ? ['\\Seen'] : []);
+    await c.logout();
+  };
+
+  it('filters on the server across all accounts, pages without gaps, and combines with a query', async () => {
+    await seed(ALICE, 'Fresh alpha', false);
+    await seed(ALICE, 'Old alpha', true);
+    await seed(BOB, 'Fresh beta', false);
+    await seed(BOB, 'Old beta', true);
+
+    const all = await listAll('unread=1&limit=50');
+    expect(all.length).toBeGreaterThanOrEqual(2);
+    expect(all.every((m) => !m.seen)).toBe(true);
+    expect(new Set(all.map((m) => m.accountId))).toEqual(new Set([accounts.alice!.id, accounts.bob!.id]));
+    const subjects = all.map((m) => m.subject);
+    expect(subjects).toEqual(expect.arrayContaining(['Fresh alpha', 'Fresh beta']));
+    expect(subjects).not.toEqual(expect.arrayContaining(['Old alpha']));
+    expect(subjects).not.toContain('Old beta');
+
+    // Paging one message at a time yields exactly the same list.
+    const paged = await listAll('unread=1&limit=1');
+    expect(paged.map((m) => `${m.accountId}:${m.uid}`)).toEqual(all.map((m) => `${m.accountId}:${m.uid}`));
+
+    // Unread + query, in a single folder and in the unified view.
+    const q = encodeURIComponent('alpha');
+    expect((await listAll(`accountId=${accounts.alice!.id}&folder=INBOX&unread=1&q=${q}`)).map((m) => m.subject)).toEqual(['Fresh alpha']);
+    expect((await listAll(`unread=1&q=${encodeURIComponent('Fresh')}`)).map((m) => m.subject).sort()).toEqual(['Fresh alpha', 'Fresh beta']);
+
+    // Once read, the server no longer returns it (the client keeps it on screen until the view changes).
+    const fresh = all.find((m) => m.subject === 'Fresh alpha')!;
+    await api('POST', '/api/messages/actions', {
+      messages: [{ accountId: fresh.accountId, folder: fresh.folder, uid: fresh.uid, uidValidity: fresh.uidValidity }],
+      action: { type: 'seen', value: true },
+    });
+    expect((await listAll('unread=1')).map((m) => m.subject)).not.toContain('Fresh alpha');
+  });
+});

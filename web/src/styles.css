@@ -190,6 +190,9 @@ svg { flex-shrink: 0; }
 .row.recent { --tint: var(--hover); }
 .row.selected { --tint: var(--active); }
 .row.checked { --tint: var(--accent-soft); }
+/* Read while "Unread only" is on: kept in place until the view changes, but visibly done. */
+.row.read-in-filter .row-main { opacity: 0.55; }
+.unread-toggle { font-size: 13px; color: var(--text-2); align-self: flex-start; user-select: none; }
 .row .acct-bar { position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; }
 .row-check { display: grid; place-items: start center; padding-top: 2px; }
 .row-check input { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; opacity: 0.35; cursor: pointer; }

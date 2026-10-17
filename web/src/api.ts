@@ -70,7 +70,7 @@ export const api = {
 
   folders: () => request<AccountFolders[]>('GET', '/api/folders'),
 
-  messages: (sel: MailboxSel, cursor: string | null, q: string) => {
+  messages: (sel: MailboxSel, cursor: string | null, q: string, unread: boolean) => {
     const p = new URLSearchParams();
     if (sel.accountId) {
       p.set('accountId', sel.accountId);
@@ -78,6 +78,7 @@ export const api = {
     }
     if (cursor) p.set('cursor', cursor);
     if (q) p.set('q', q);
+    if (unread) p.set('unread', '1');
     return request<ListResponse>('GET', `/api/messages?${p.toString()}`);
   },
   message: (r: MessageRef, remote: boolean) => request<MessageDetail>('GET', `/api/message?${refQuery(r)}${remote ? '&remote=1' : ''}`),

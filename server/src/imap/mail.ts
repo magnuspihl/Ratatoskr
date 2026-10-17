@@ -47,9 +47,15 @@ export interface ListSource {
   folder: string;
 }
 
-export interface SearchQuery {
+/** Server-side filtering of a listing: a text query and/or unread only. */
+export interface ListFilter {
+  /** '' = no text query */
   text: string;
+  unread: boolean;
 }
+
+export const NO_FILTER: ListFilter = { text: '', unread: false };
+export const isFiltered = (f: ListFilter) => f.text !== '' || f.unread;
 
 interface FetchedItem {
   source: ListSource;
@@ -141,16 +147,27 @@ export function mergePages(pages: SourcePage[], limit: number, previous: CursorM
 }
 
 /**
- * Server-side search. The preferred query matches subject, sender, recipients or body. Some
- * servers reject parts of it (e.g. FROM/TO with spaces), which fails the whole command, so fall
+ * IMAP SEARCH criteria for a filtered listing, in order of preference. Each source (folder) of a
+ * listing gets its own set, scoped below its cursor so paging stays exact; unread-only adds
+ * UNSEEN to every attempt. The text query prefers subject/sender/recipients/body; some servers
+ * reject parts of that (e.g. FROM/TO with spaces), which fails the whole command, so it falls
  * back to the standard TEXT search (headers + body), then to SUBJECT alone.
  */
-export async function searchWithFallback(client: ImapFlow, q: string, scope: SearchObject): Promise<number[]> {
-  const attempts: SearchObject[] = [
+export function searchAttempts(filter: ListFilter, cursor?: Pick<AccountCursor, 'beforeUid'>): SearchObject[] {
+  const scope: SearchObject = {};
+  if (cursor) scope.uid = `1:${cursor.beforeUid - 1}`;
+  if (filter.unread) scope.seen = false;
+  const q = filter.text;
+  if (!q) return [Object.keys(scope).length ? scope : { all: true }];
+  return [
     { ...scope, or: [{ subject: q }, { from: q }, { to: q }, { body: q }] },
     { ...scope, text: q },
     { ...scope, subject: q },
   ];
+}
+
+/** Run the first search attempt the server accepts. */
+export async function searchWithFallback(client: ImapFlow, attempts: SearchObject[]): Promise<number[]> {
   for (const criteria of attempts) {
     const res = await client.search(criteria, { uid: true }).catch(() => false as const);
     if (Array.isArray(res)) return res;
@@ -206,7 +223,7 @@ export class MailService {
     source: ListSource,
     cursor: AccountCursor | undefined,
     limit: number,
-    search: SearchQuery | null,
+    filter: ListFilter,
   ): Promise<SourcePage> {
     return this.pool.withMailbox(userId, source.accountId, source.folder, async (client, selected) => {
       // The pooled connection may have had this folder selected for a while. Not every server
@@ -227,9 +244,8 @@ export class MailService {
       let range: string;
       let useUid: boolean;
       let exhausted: boolean;
-      if (search) {
-        const scope = cursor ? { uid: `1:${cursor.beforeUid - 1}` } : {};
-        const uids = (await searchWithFallback(client, search.text, scope)).sort((a, b) => a - b);
+      if (isFiltered(filter)) {
+        const uids = (await searchWithFallback(client, searchAttempts(filter, cursor))).sort((a, b) => a - b);
         const page = uids.slice(-limit);
         if (page.length === 0) return empty;
         range = page.join(',');
@@ -349,7 +365,7 @@ export class MailService {
     sources: ListSource[],
     rawCursor: string | null,
     limit: number,
-    search: SearchQuery | null,
+    filter: ListFilter = NO_FILTER,
   ): Promise<MessageListResponse> {
     const previous = decodeCursor(rawCursor);
     const errors: MessageListResponse['errors'] = [];
@@ -357,7 +373,7 @@ export class MailService {
       await Promise.all(
         sources.map(async (s) => {
           try {
-            return await this.fetchSourcePage(userId, s, previous[sourceKey(s)], limit, search);
+            return await this.fetchSourcePage(userId, s, previous[sourceKey(s)], limit, filter);
           } catch (err) {
             errors.push({ accountId: s.accountId, error: describeError(err, 'IMAP').message });
             return null;

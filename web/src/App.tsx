@@ -12,7 +12,8 @@ import { Sidebar } from './components/Sidebar';
 import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts } from './hooks';
 import { blankComposer, composerFor } from './replies';
 import { useRouter, type Location } from './router';
-import { HOME, listRoute, openMessageFolder, type Route } from './routing';
+import { HOME, listRoute, openMessageFolder, viewKey, type Route } from './routing';
+import { updateSticky, withSticky } from './sticky';
 import { removesFromList, swipeToAction, type Direction, type UndoStep } from './swipe';
 import { refKey, toRef } from './util';
 
@@ -84,8 +85,23 @@ export function App() {
     () => (sel.accountId === null && accounts.length === 1 ? { accountId: accounts[0]!.id, folder: 'INBOX' } : sel),
     [sel, accounts],
   );
-  const messagesQ = useMessages(effectiveSel, query, loggedIn && accounts.length > 0);
-  const messages = useMemo(() => messagesQ.data?.pages.flatMap((p) => p.messages) ?? [], [messagesQ.data]);
+  const messagesQ = useMessages(effectiveSel, query, route.unread, loggedIn && accounts.length > 0);
+  const serverMessages = useMemo(() => messagesQ.data?.pages.flatMap((p) => p.messages) ?? [], [messagesQ.data]);
+
+  // "Unread only": messages read in this view stay listed (dimmed) until the view changes or is
+  // refreshed. Both the sticky keys and the last shown list are tied to the current view.
+  const currentView = viewKey(route);
+  const [sticky, setSticky] = useState<{ view: string; keys: Set<string> }>({ view: '', keys: new Set() });
+  const lastShown = useRef<{ view: string; list: MessageSummary[] }>({ view: '', list: [] });
+  const messages = useMemo(() => {
+    if (!route.unread) return serverMessages;
+    const keys = sticky.view === currentView ? sticky.keys : new Set<string>();
+    const prev = lastShown.current.view === currentView ? lastShown.current.list : [];
+    return withSticky(prev, serverMessages, keys, refKey);
+  }, [serverMessages, sticky, currentView, route.unread]);
+  useEffect(() => {
+    lastShown.current = { view: currentView, list: messages };
+  }, [currentView, messages]);
   const listErrors = messagesQ.data?.pages.at(-1)?.errors ?? [];
 
   useLiveUpdates(loggedIn && accounts.length > 0);
@@ -149,6 +165,10 @@ export function App() {
         else back(listRoute(route));
       }
       if (removes) setChecked(new Set());
+      if (route.unread) {
+        const view = viewKey(route);
+        setSticky((s) => ({ view, keys: updateSticky(s.view === view ? s.keys : new Set(), refs.map(refKey), action) }));
+      }
       const res = await runAction(refs, action);
       if (!res.ok) return;
       const n = refs.length;
@@ -309,7 +329,7 @@ export function App() {
           setChecked(new Set());
           // From the phone drawer, the folder replaces the drawer entry: Back then returns to the
           // previous folder rather than reopening the drawer.
-          const r: Route = { accountId: s.accountId, folder: s.folder, q: '', open: null };
+          const r: Route = { accountId: s.accountId, folder: s.folder, q: '', unread: false, open: null };
           if (overlay === 'nav') navigate(r, { replace: true });
           else go(r);
         }}
@@ -351,7 +371,14 @@ export function App() {
         }
         onCheckAll={(on) => setChecked(on ? new Set(messages.map(refKey)) : new Set())}
         onLoadMore={() => void messagesQ.fetchNextPage()}
+        unreadOnly={route.unread}
+        onUnreadOnly={(on) => {
+          setChecked(new Set());
+          go({ ...route, unread: on, open: null });
+        }}
         onRefresh={() => {
+          // An explicit refresh also lets read messages leave the unread-only list.
+          setSticky({ view: '', keys: new Set() });
           void qc.invalidateQueries({ queryKey: ['messages'] });
           void qc.invalidateQueries({ queryKey: ['folders'] });
         }}
