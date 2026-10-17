@@ -171,3 +171,25 @@ describe('css sanitizer', () => {
     expect(out).not.toContain('@font-face');
   });
 });
+
+describe('iframe document', () => {
+  const palette = { background: '#111', text: '#eee', muted: '#888', link: '#09f', border: '#333' };
+  it('carries a strict CSP that only allows the image proxy', () => {
+    const doc = buildSrcdoc({ html: '<p>x</p>', css: '', mode: 'dark', origin: 'https://mail.example.com', palette });
+    expect(doc).toContain(`http-equiv="Content-Security-Policy" content="default-src 'none'`);
+    expect(doc).toContain('img-src data: https://mail.example.com/api/proxy/image');
+    expect(doc).toContain("script-src 'none'");
+    expect(doc).toContain("form-action 'none'");
+    expect(doc).toContain('<meta name="referrer" content="no-referrer">');
+  });
+  it('does not let palette values inject CSS', () => {
+    const doc = buildSrcdoc({
+      html: '',
+      css: '',
+      mode: 'dark',
+      origin: 'https://mail.example.com',
+      palette: { ...palette, background: 'red;} body{background:url(https://evil.example.com/x)' },
+    });
+    expect(doc).not.toContain('evil.example.com');
+  });
+});

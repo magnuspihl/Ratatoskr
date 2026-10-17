@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ListResponse, MessageAction, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
+import type { ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
 import { api, type MailboxSel } from './api';
 import { refKey } from './util';
 
@@ -54,9 +54,14 @@ export function useMessageAction(onError: (msg: string) => void) {
       if (refs.length === 0) return;
       const keys = new Set(refs.map(refKey));
       const hit = (m: MessageSummary) => keys.has(refKey(m));
-      if (action.type === 'seen') update((m) => (hit(m) ? { ...m, seen: action.value } : m));
-      else if (action.type === 'flagged') update((m) => (hit(m) ? { ...m, flagged: action.value } : m));
-      else update((m) => (hit(m) ? null : m));
+      if (action.type === 'seen' || action.type === 'flagged') {
+        const field = action.type;
+        update((m) => (hit(m) ? { ...m, [field]: action.value } : m));
+        // Keep open message details in sync as well.
+        qc.setQueriesData<MessageDetail>({ queryKey: ['message'] }, (d) =>
+          d && keys.has(refKey(d)) ? { ...d, [field]: action.value } : d,
+        );
+      } else update((m) => (hit(m) ? null : m));
       try {
         await api.action(refs, action);
       } catch (err) {
@@ -125,9 +130,9 @@ export function useTheme(pref: Preferences['theme'] | undefined): ResolvedTheme 
     return () => mq.removeEventListener('change', on);
   }, []);
   const theme = !pref || pref === 'system' ? system : pref;
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-  }, [theme]);
+  // Applied during render (idempotent) so children that read CSS variables, such as the message
+  // iframe palette, already see the new theme in the same render.
+  if (document.documentElement.dataset.theme !== theme) document.documentElement.dataset.theme = theme;
   return theme;
 }
 
