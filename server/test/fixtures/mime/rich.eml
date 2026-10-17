@@ -1,0 +1,47 @@
+From: =?UTF-8?Q?J=C3=B6rg_Example?= <sender@example.com>
+To: Test User <user@example.com>, "Other, Person" <other@example.org>
+Cc: undisclosed-recipients:;
+Subject: =?UTF-8?B?UmU6IFLDpGtzbcO2cmfDpXMg8J+SoQ==?=
+Date: Tue, 01 Sep 2026 10:15:00 +0200
+Message-ID: <msg-2@example.com>
+In-Reply-To: <msg-1@example.com>
+References: <msg-0@example.com> <msg-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mixed"
+
+--mixed
+Content-Type: multipart/related; boundary="related"
+
+--related
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hej! R=C3=A4ksm=C3=B6rg=C3=A5s is ready. This line is long enough that it get=
+s soft-wrapped by quoted-printable encoding.
+
+> quoted older text
+--alt
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<p onclick=3D"alert(1)">Hej! <b>R=C3=A4ksm=C3=B6rg=C3=A5s</b></p><img src=3D"cid:logo@example=
+.com"><img src=3D"https://tracker.example.com/p.gif">
+--alt--
+--related
+Content-Type: image/png
+Content-ID: <logo@example.com>
+Content-Disposition: inline
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=
+--related--
+--mixed
+Content-Type: application/pdf; name="report.pdf"
+Content-Disposition: attachment; filename="report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKJcOkw7zDtsOfCjEgMCBvYmoKPDwvVHlwZS9DYXRhbG9nPj4KZW5kb2JqCg==
+--mixed--

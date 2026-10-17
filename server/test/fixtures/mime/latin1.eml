@@ -1,0 +1,8 @@
+From: sender@example.com
+To: user@example.com
+Subject: Latin-1 plain
+Date: Wed, 02 Sep 2026 08:00:00 +0000
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: 8bit
+
+Grüße aus Köln

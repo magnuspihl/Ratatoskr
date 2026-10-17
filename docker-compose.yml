@@ -1,0 +1,19 @@
+# Example deployment. Put a TLS-terminating reverse proxy in front (see README).
+services:
+  ratatoskr:
+    image: ghcr.io/OWNER/ratatoskr:latest   # replace OWNER, or build locally with `build: .`
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      RATATOSKR_BASE_URL: https://mail.example.com
+      RATATOSKR_SECRET_KEY: ${RATATOSKR_SECRET_KEY:?set RATATOSKR_SECRET_KEY in .env}
+      RATATOSKR_TRUST_PROXY: "true"
+      OIDC_ISSUER_URL: https://auth.example.com/application/o/ratatoskr/
+      OIDC_CLIENT_ID: ratatoskr
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET in .env}
+    volumes:
+      - ratatoskr-data:/data
+
+volumes:
+  ratatoskr-data:
