@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { parseHostSuffix } from '../../shared/devHosts.js';
 
 export interface Config {
   production: boolean;
@@ -17,6 +18,11 @@ export interface Config {
   } | null;
   /** Development-only login bypass. Never honoured when NODE_ENV=production. */
   devLogin: boolean;
+  /**
+   * Development-only: extra hostnames (ending in this suffix) the app may be served from, e.g. via
+   * several reverse-proxied dev ports. Always null when NODE_ENV=production.
+   */
+  devAllowedHostSuffix: string | null;
   /** Refuse IMAP/SMTP hosts that resolve to private/internal addresses. */
   blockPrivateMailHosts: boolean;
   /** Close pooled IMAP connections after this many ms without use. */
@@ -69,6 +75,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     errors.push('OIDC_ISSUER_URL is required (or RATATOSKR_DEV_LOGIN=true outside production)');
   }
 
+  let devAllowedHostSuffix: string | null = null;
+  if (!production) {
+    try {
+      devAllowedHostSuffix = parseHostSuffix(env.RATATOSKR_DEV_ALLOWED_HOST_SUFFIX);
+    } catch (err) {
+      errors.push((err as Error).message);
+    }
+  }
+
   if (errors.length) throw new Error(`Invalid configuration:\n  - ${errors.join('\n  - ')}`);
 
   return {
@@ -82,6 +97,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logLevel: env.LOG_LEVEL || 'info',
     oidc,
     devLogin,
+    devAllowedHostSuffix,
     blockPrivateMailHosts: bool(env.RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS, false),
     imapIdleTimeoutMs: int(env.RATATOSKR_IMAP_IDLE_TIMEOUT, 300) * 1000,
     maxMessageBytes: int(env.RATATOSKR_MAX_MESSAGE_MB, 50) * 1024 * 1024,
