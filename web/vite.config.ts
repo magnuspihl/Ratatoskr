@@ -7,8 +7,9 @@ const root = path.resolve(import.meta.dirname, '..');
 export default defineConfig(({ mode }) => {
   const env = { ...loadEnv(mode, root, ''), ...process.env };
   const backend = `http://127.0.0.1:${env.BACKEND_PORT || '8081'}`;
-  // In development, accept the host from RATATOSKR_BASE_URL (e.g. a reverse-proxied preview URL).
-  const allowedHosts: string[] = [];
+  // Vite rejects unknown Host headers. Accept localhost plus the host from RATATOSKR_BASE_URL
+  // (e.g. a reverse-proxied preview URL), so nothing deployment-specific lives in the repo.
+  const allowedHosts: string[] = ['localhost'];
   try {
     if (env.RATATOSKR_BASE_URL) allowedHosts.push(new URL(env.RATATOSKR_BASE_URL).hostname);
   } catch {
