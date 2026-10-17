@@ -108,6 +108,8 @@ export interface MessageDetail {
   from: Address[];
   to: Address[];
   cc: Address[];
+  /** Only present on drafts and sent copies that kept the header. */
+  bcc: Address[];
   replyTo: Address[];
   date: string;
   seen: boolean;

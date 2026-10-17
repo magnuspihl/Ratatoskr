@@ -105,6 +105,7 @@ export function buildMessageDetail(email: ParsedEmail, meta: DetailMeta, opts: D
     from: flattenAddresses(email.from),
     to: flattenAddresses(email.to),
     cc: flattenAddresses(email.cc),
+    bcc: flattenAddresses(email.bcc),
     replyTo: flattenAddresses(email.replyTo),
     date: (date && !Number.isNaN(date.getTime()) ? date : new Date(0)).toISOString(),
     seen: meta.flags.has('\\Seen'),
