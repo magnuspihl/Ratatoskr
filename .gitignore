@@ -1,0 +1,23 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Local data (SQLite database, never commit)
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite*
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
