@@ -3,6 +3,8 @@ import { ImapFlow } from 'imapflow';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import type {
   AccountFolders,
+  ActionResult,
+  MessageAction,
   AccountView,
   ComposePayload,
   DraftResult,
@@ -16,6 +18,7 @@ import { buildApp, type App } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import { Keyring, sealJson } from '../../src/crypto.js';
 import { Store } from '../../src/db.js';
+import { undoPlan } from '../../../web/src/swipe.js';
 
 /**
  * End-to-end tests of the HTTP API against a real IMAP/SMTP server (GreenMail, see
@@ -211,6 +214,11 @@ describe('unified inbox', () => {
   it('paginates a single folder', async () => {
     const all = await listAll(`accountId=${accounts.alice!.id}&folder=INBOX&limit=1`);
     expect(all.map((m) => m.subject)).toEqual(['A3 newest html', 'A2 middle', 'A1 oldest']);
+  });
+
+  it('searches with multi-word queries (falls back when the server rejects parts of the query)', async () => {
+    const res = await listAll(`accountId=${accounts.alice!.id}&folder=INBOX&q=${encodeURIComponent('newest html')}`);
+    expect(res.map((m) => m.subject)).toEqual(['A3 newest html']);
   });
 
   it('searches server-side in a folder and across accounts', async () => {
@@ -441,5 +449,94 @@ describe('live updates', () => {
     const ws = await ctx.app.injectWS('/api/ws', { headers: { cookie, origin: 'https://evil.example.com' } });
     const code = await new Promise<number>((resolve) => ws.on('close', (c) => resolve(c)));
     expect(code).toBe(4401);
+  });
+});
+
+describe('undo and the Archive fallback', () => {
+  const toRef = (m: MessageSummary) => ({ accountId: m.accountId, folder: m.folder, uid: m.uid, uidValidity: m.uidValidity });
+  const seed = async (user: string, subject: string) => {
+    const c = imapClient(user);
+    await c.connect();
+    await c.append('INBOX', rawMessage({ from: BOB, to: user, subject, date: new Date(), id: subject.replace(/\W/g, '') }));
+    await c.logout();
+  };
+  /** Run an action, then undo it exactly the way the web client does. */
+  const actAndUndo = async (m: MessageSummary, action: MessageAction) => {
+    const res = await api<ActionResult>('POST', '/api/messages/actions', { messages: [toRef(m)], action });
+    expect(res.status).toBe(200);
+    const plan = undoPlan(action, [toRef(m)], res.json, () => (action.type === 'seen' ? m.seen : m.flagged));
+    expect(plan).not.toBeNull();
+    for (const step of plan!) {
+      expect((await api('POST', '/api/messages/actions', { messages: step.refs, action: step.action })).status).toBe(200);
+    }
+    return res.json;
+  };
+
+  it('undoes archive: the message returns to INBOX', async () => {
+    const id = accounts.alice!.id;
+    await seed(ALICE, 'Undo archive');
+    const [m] = await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Undo archive')}`);
+    const res = await actAndUndo(m!, { type: 'archive' });
+    expect(res.undo[0]).toMatchObject({ accountId: id, folder: 'Archive', restoreTo: 'INBOX' });
+    expect((await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Undo archive')}`)).map((x) => x.subject)).toEqual(['Undo archive']);
+    expect(await listAll(`accountId=${id}&folder=Archive&q=${encodeURIComponent('Undo archive')}`)).toEqual([]);
+  });
+
+  it('undoes delete: the message comes back out of Trash', async () => {
+    const id = accounts.alice!.id;
+    await seed(ALICE, 'Undo delete');
+    const [m] = await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Undo delete')}`);
+    const res = await actAndUndo(m!, { type: 'delete' });
+    expect(res.permanent).toBe(false);
+    expect(res.undo[0]!.folder).toBe('Trash');
+    expect((await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Undo delete')}`)).map((x) => x.subject)).toEqual(['Undo delete']);
+    expect(await listAll(`accountId=${id}&folder=Trash&q=${encodeURIComponent('Undo delete')}`)).toEqual([]);
+  });
+
+  it('undoes read/flag changes', async () => {
+    const id = accounts.alice!.id;
+    await seed(ALICE, 'Undo flag');
+    const [m] = await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Undo flag')}`);
+    expect(m!.flagged).toBe(false);
+    await actAndUndo(m!, { type: 'flagged', value: true });
+    expect((await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Undo flag')}`))[0]!.flagged).toBe(false);
+  });
+
+  it('reports permanent deletion from Trash as not undoable', async () => {
+    const id = accounts.alice!.id;
+    await seed(ALICE, 'Gone for good');
+    const [m] = await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Gone for good')}`);
+    await api('POST', '/api/messages/actions', { messages: [toRef(m!)], action: { type: 'delete' } });
+    const [inTrash] = await listAll(`accountId=${id}&folder=Trash&q=${encodeURIComponent('Gone for good')}`);
+    const res = await api<ActionResult>('POST', '/api/messages/actions', { messages: [toRef(inTrash!)], action: { type: 'delete' } });
+    expect(res.json.permanent).toBe(true);
+    expect(undoPlan({ type: 'delete' }, [toRef(inTrash!)], res.json, () => undefined)).toBeNull();
+  });
+
+  it('creates an Archive folder for an account that has none, and archive is undoable', async () => {
+    const id = accounts.bob!.id;
+    const before = (await api<AccountFolders[]>('GET', '/api/folders')).json.find((f) => f.accountId === id)!;
+    expect(before.folders.some((f) => f.specialUse === 'archive')).toBe(false);
+    await seed(BOB, 'Bob archive');
+    const [m] = await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Bob archive')}`);
+    const res = await api<ActionResult>('POST', '/api/messages/actions', { messages: [toRef(m!)], action: { type: 'archive' } });
+    expect(res.status).toBe(200);
+    expect(res.json.createdFolders).toEqual(['Archive']);
+    const after = (await api<AccountFolders[]>('GET', '/api/folders')).json.find((f) => f.accountId === id)!;
+    expect(after.folders.find((f) => f.specialUse === 'archive')?.path).toBe('Archive');
+    expect((await listAll(`accountId=${id}&folder=Archive`)).map((x) => x.subject)).toEqual(['Bob archive']);
+    // A second archive reuses the folder instead of creating another.
+    await seed(BOB, 'Bob archive 2');
+    const [m2] = await listAll(`accountId=${id}&folder=INBOX&q=${encodeURIComponent('Bob archive 2')}`);
+    const res2 = await api<ActionResult>('POST', '/api/messages/actions', { messages: [toRef(m2!)], action: { type: 'archive' } });
+    expect(res2.json.createdFolders).toEqual([]);
+  });
+
+  it('stores swipe preferences and rejects unknown actions', async () => {
+    const ok = await api('PUT', '/api/preferences', { theme: 'dark', pageSize: 50, markReadOnOpen: true, swipeLeft: 'toggleRead', swipeRight: 'none' });
+    expect(ok.status).toBe(200);
+    expect((await api<{ preferences: Record<string, unknown> }>('GET', '/api/me')).json.preferences).toMatchObject({ swipeLeft: 'toggleRead', swipeRight: 'none' });
+    const bad = await api('PUT', '/api/preferences', { theme: 'dark', pageSize: 50, markReadOnOpen: true, swipeLeft: 'explode', swipeRight: 'none' });
+    expect(bad.status).toBe(400);
   });
 });

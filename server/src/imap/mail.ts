@@ -1,4 +1,4 @@
-import type { FetchMessageObject, ImapFlow, ListResponse, MessageAddressObject } from 'imapflow';
+import type { FetchMessageObject, ImapFlow, ListResponse, MessageAddressObject, SearchObject } from 'imapflow';
 import type {
   AccountCursor,
   AccountFolders,
@@ -10,6 +10,7 @@ import type {
   MessageRef,
   MessageSummary,
   SpecialUse,
+  UndoInfo,
 } from '../../../shared/types.js';
 import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
 import { MailServerError, describeError } from './connect.js';
@@ -137,6 +138,24 @@ export function mergePages(pages: SourcePage[], limit: number, previous: CursorM
   return { picked, cursor, more };
 }
 
+/**
+ * Server-side search. The preferred query matches subject, sender, recipients or body. Some
+ * servers reject parts of it (e.g. FROM/TO with spaces), which fails the whole command, so fall
+ * back to the standard TEXT search (headers + body), then to SUBJECT alone.
+ */
+export async function searchWithFallback(client: ImapFlow, q: string, scope: SearchObject): Promise<number[]> {
+  const attempts: SearchObject[] = [
+    { ...scope, or: [{ subject: q }, { from: q }, { to: q }, { body: q }] },
+    { ...scope, text: q },
+    { ...scope, subject: q },
+  ];
+  for (const criteria of attempts) {
+    const res = await client.search(criteria, { uid: true }).catch(() => false as const);
+    if (Array.isArray(res)) return res;
+  }
+  return [];
+}
+
 export class MailService {
   constructor(private readonly pool: ImapPool) {}
 
@@ -187,7 +206,12 @@ export class MailService {
     limit: number,
     search: SearchQuery | null,
   ): Promise<SourcePage> {
-    return this.pool.withMailbox(userId, source.accountId, source.folder, async (client, mailbox) => {
+    return this.pool.withMailbox(userId, source.accountId, source.folder, async (client, selected) => {
+      // The pooled connection may have had this folder selected for a while. Not every server
+      // pushes EXISTS for mail delivered meanwhile; a NOOP makes it report new messages, so the
+      // listing (which counts from EXISTS) never misses the newest mail.
+      await client.noop();
+      const mailbox = (client.mailbox || selected) as typeof selected;
       const uidValidity = mailbox.uidValidity.toString();
       let reset = false;
       if (cursor && cursor.uidValidity !== uidValidity) {
@@ -202,11 +226,8 @@ export class MailService {
       let useUid: boolean;
       let exhausted: boolean;
       if (search) {
-        const q = search.text;
-        const criteria = cursor
-          ? { uid: `1:${cursor.beforeUid - 1}`, or: [{ subject: q }, { from: q }, { to: q }, { body: q }] }
-          : { or: [{ subject: q }, { from: q }, { to: q }, { body: q }] };
-        const uids = ((await client.search(criteria, { uid: true })) || []).sort((a, b) => a - b);
+        const scope = cursor ? { uid: `1:${cursor.beforeUid - 1}` } : {};
+        const uids = (await searchWithFallback(client, search.text, scope)).sort((a, b) => a - b);
         const page = uids.slice(-limit);
         if (page.length === 0) return empty;
         range = page.join(',');
@@ -418,18 +439,53 @@ export class MailService {
 
   // ---- actions ---------------------------------------------------------------
 
-  /** Apply an action to messages that all live in the same account and folder. */
-  async applyAction(userId: string, accountId: string, folder: string, uidValidity: string, uids: number[], action: MessageAction) {
-    if (uids.length === 0) return;
+  /**
+   * Find the Archive folder, creating one (inside the personal namespace) if the account has none.
+   * Creating it is the least surprising fallback: "archive" keeps working like in other clients.
+   */
+  async ensureArchive(userId: string, accountId: string): Promise<{ path: string; created: boolean }> {
+    const existing = await this.specialFolder(userId, accountId, 'archive');
+    if (existing) return { path: existing, created: false };
+    try {
+      const res = await this.pool.withClient(userId, accountId, async (client) => {
+        const created = await client.mailboxCreate(['Archive']);
+        await client.mailboxSubscribe(created.path).catch(() => undefined);
+        return created;
+      });
+      await this.pool.folders(userId, accountId, true);
+      return { path: res.path, created: true };
+    } catch (err) {
+      const e = err as { responseText?: string; message?: string };
+      throw new MailServerError(`This account has no Archive folder and one could not be created: ${e.responseText || e.message}`, 'protocol');
+    }
+  }
+
+  /**
+   * Apply an action to messages that all live in the same account and folder. For moves (move,
+   * archive, delete-to-Trash) the result describes where the messages went, so the client can
+   * undo the action by moving them back.
+   */
+  async applyAction(
+    userId: string,
+    accountId: string,
+    folder: string,
+    uidValidity: string,
+    uids: number[],
+    action: MessageAction,
+  ): Promise<{ undo: UndoInfo | null; permanent: boolean; createdFolder: string | null }> {
+    const none = { undo: null, permanent: false, createdFolder: null };
+    if (uids.length === 0) return none;
     const range = uids.join(',');
     const ref = { accountId, folder, uid: 0, uidValidity };
 
     let destination: string | null = null;
     let expunge = false;
+    let createdFolder: string | null = null;
     if (action.type === 'move') destination = action.destination;
     if (action.type === 'archive') {
-      destination = await this.specialFolder(userId, accountId, 'archive');
-      if (!destination) throw new MailServerError('This account has no Archive folder', 'protocol');
+      const archive = await this.ensureArchive(userId, accountId);
+      destination = archive.path;
+      if (archive.created) createdFolder = archive.path;
     }
     if (action.type === 'delete') {
       const trash = await this.specialFolder(userId, accountId, 'trash');
@@ -438,22 +494,54 @@ export class MailService {
       else if (trash === folder) expunge = true;
       else throw new MailServerError('This account has no Trash folder', 'protocol');
     }
-    if (destination === folder) return;
+    if (destination === folder) return none;
 
-    await this.pool.withMailbox(userId, accountId, folder, async (client: ImapFlow, mailbox) => {
+    const moved = await this.pool.withMailbox(userId, accountId, folder, async (client: ImapFlow, mailbox) => {
       this.checkValidity(mailbox, ref);
       switch (action.type) {
         case 'seen':
           await (action.value ? client.messageFlagsAdd(range, ['\\Seen'], { uid: true }) : client.messageFlagsRemove(range, ['\\Seen'], { uid: true }));
-          break;
+          return null;
         case 'flagged':
           await (action.value ? client.messageFlagsAdd(range, ['\\Flagged'], { uid: true }) : client.messageFlagsRemove(range, ['\\Flagged'], { uid: true }));
-          break;
-        default:
-          if (expunge) await client.messageDelete(range, { uid: true });
-          else if (destination) await client.messageMove(range, destination, { uid: true });
+          return null;
+        default: {
+          if (expunge) {
+            await client.messageDelete(range, { uid: true });
+            return null;
+          }
+          if (!destination) return null;
+          // Remember Message-IDs in case the server can't tell us the new UIDs (no UIDPLUS).
+          const ids = (await client.fetchAll(range, { uid: true, envelope: true }, { uid: true }))
+            .map((m) => m.envelope?.messageId)
+            .filter((id): id is string => !!id);
+          const res = await client.messageMove(range, destination, { uid: true });
+          return { res, ids };
+        }
       }
     });
+
+    if (expunge) return { ...none, permanent: true };
+    if (!moved || !destination) return { ...none, createdFolder };
+    let newUids = moved.res && moved.res.uidMap ? [...moved.res.uidMap.values()] : [];
+    let destValidity = moved.res && moved.res.uidValidity ? moved.res.uidValidity.toString() : null;
+    if (!newUids.length || !destValidity) {
+      // No UIDPLUS: locate the moved messages by Message-ID.
+      const found = await this.pool.withMailbox(userId, accountId, destination, async (client, mailbox) => {
+        const out: number[] = [];
+        for (const id of moved.ids) {
+          const hits = (await client.search({ header: { 'message-id': id } }, { uid: true })) || [];
+          if (hits.length) out.push(Math.max(...hits));
+        }
+        return { uids: out, uidValidity: mailbox.uidValidity.toString() };
+      });
+      newUids = found.uids;
+      destValidity = found.uidValidity;
+    }
+    const undo: UndoInfo | null = newUids.length
+      ? { accountId, folder: destination, uidValidity: destValidity, uids: newUids, restoreTo: folder }
+      : null;
+    return { undo, permanent: false, createdFolder };
   }
 
   /** Mark the message a reply/forward refers to as \Answered (best effort). */

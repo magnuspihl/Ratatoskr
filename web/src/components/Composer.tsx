@@ -127,9 +127,11 @@ interface Props {
   onClose: () => void;
   onToast: (msg: string, error?: boolean) => void;
   onSent: () => void;
+  /** Mirrors the unsaved-changes state, so browser Back can ask before discarding. */
+  dirtyRef?: { current: boolean };
 }
 
-export function Composer({ init, accounts, onClose, onToast, onSent }: Props) {
+export function Composer({ init, accounts, onClose, onToast, onSent, dirtyRef }: Props) {
   const [accountId, setAccountId] = useState(init.accountId);
   const [to, setTo] = useState(init.to);
   const [cc, setCc] = useState(init.cc);
@@ -159,7 +161,14 @@ export function Composer({ init, accounts, onClose, onToast, onSent }: Props) {
     }
   }, [init.html, init.to]);
 
-  useEffect(() => setDirty(true), [to, cc, bcc, subject, files, accountId]);
+  // Unsaved changes: editor input since the last save, or header fields that differ from the last
+  // saved (or initial) values.
+  const fields = JSON.stringify([to, cc, bcc, subject, accountId, files.length]);
+  const [baseline, setBaseline] = useState(fields);
+  const unsaved = dirty || fields !== baseline;
+  useEffect(() => {
+    if (dirtyRef) dirtyRef.current = unsaved;
+  }, [unsaved, dirtyRef]);
 
   const payload = (): ComposePayload => ({
     accountId,
@@ -195,6 +204,7 @@ export function Composer({ init, accounts, onClose, onToast, onSent }: Props) {
     setError(null);
     try {
       const res = await api.saveDraft(payload(), files);
+      let remainingFiles = files.length;
       if (res.draft) {
         setDraft(res.draft);
         // Attachments now live in the saved draft (the previous one was replaced), so future
@@ -204,9 +214,11 @@ export function Composer({ init, accounts, onClose, onToast, onSent }: Props) {
           setFwdSource(res.draft);
           setFwd(saved.attachments.filter((a) => !a.inline));
           setFiles([]);
+          remainingFiles = 0;
         }
       }
       setDirty(false);
+      setBaseline(JSON.stringify([to, cc, bcc, subject, accountId, remainingFiles]));
       onToast('Draft saved');
       onSent();
     } catch (err) {
@@ -217,7 +229,7 @@ export function Composer({ init, accounts, onClose, onToast, onSent }: Props) {
   };
 
   const close = () => {
-    if (dirty && !window.confirm('Discard this message?')) return;
+    if (unsaved && !window.confirm('Discard this message?')) return;
     onClose();
   };
 

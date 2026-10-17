@@ -1,5 +1,6 @@
 import type {
   AccountFolders,
+  ActionResult,
   AccountInput,
   AccountView,
   ComposePayload,
@@ -81,7 +82,7 @@ export const api = {
   },
   message: (r: MessageRef, remote: boolean) => request<MessageDetail>('GET', `/api/message?${refQuery(r)}${remote ? '&remote=1' : ''}`),
   attachmentUrl: (r: MessageRef, index: number) => `/api/attachment?${refQuery(r)}&index=${index}`,
-  action: (messages: MessageRef[], action: MessageAction) => request<{ ok: true }>('POST', '/api/messages/actions', { messages, action }),
+  action: (messages: MessageRef[], action: MessageAction) => request<ActionResult>('POST', '/api/messages/actions', { messages, action }),
 
   send: (payload: ComposePayload, files: File[]) => request<SendResult>('POST', '/api/send', composeForm(payload, files)),
   saveDraft: (payload: ComposePayload, files: File[]) => request<DraftResult>('POST', '/api/drafts', composeForm(payload, files)),

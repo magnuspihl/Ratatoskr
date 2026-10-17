@@ -15,6 +15,7 @@ import {
   Trash2,
   UserCog,
   Layers,
+  X,
 } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import type { AccountFolders, AccountView, FolderView, SpecialUse } from '../../../shared/types';
@@ -55,9 +56,10 @@ interface Props {
   onSettings: () => void;
   onLogout: () => void;
   userLabel: string;
+  onCloseNav: () => void;
 }
 
-export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccounts, onSettings, onLogout, userLabel }: Props) {
+export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccounts, onSettings, onLogout, userLabel, onCloseNav }: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const totalUnread = (folders ?? []).reduce((sum, a) => sum + (a.folders.find((f) => f.specialUse === 'inbox')?.unread ?? 0), 0);
 
@@ -67,7 +69,10 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
         <div className="brand-mark">
           <Mail size={15} />
         </div>
-        Ratatoskr
+        <span style={{ flex: 1 }}>Ratatoskr</span>
+        <button className="icon-btn mobile-only" title="Close" onClick={onCloseNav}>
+          <X size={18} />
+        </button>
       </div>
       <button className="btn primary compose-btn" onClick={onCompose} disabled={accounts.length === 0}>
         <PenSquare size={16} /> Compose

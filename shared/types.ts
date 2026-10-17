@@ -132,6 +132,25 @@ export type MessageAction =
   | { type: 'archive' }
   | { type: 'delete' };
 
+/** Where moved messages ended up, so the move can be undone by moving them back. */
+export interface UndoInfo {
+  accountId: string;
+  folder: string;
+  uidValidity: string;
+  uids: number[];
+  restoreTo: string;
+}
+
+export interface ActionResult {
+  undo: UndoInfo[];
+  /** True if messages were permanently deleted (expunged from Trash). */
+  permanent: boolean;
+  /** Folders that had to be created (e.g. a missing Archive). */
+  createdFolders: string[];
+}
+
+export type SwipeAction = 'none' | 'delete' | 'archive' | 'toggleRead' | 'toggleFlag';
+
 export interface MessageRef {
   accountId: string;
   folder: string;
@@ -170,6 +189,8 @@ export interface Preferences {
   theme: 'system' | 'light' | 'dark';
   pageSize: number;
   markReadOnOpen: boolean;
+  swipeLeft: SwipeAction;
+  swipeRight: SwipeAction;
 }
 
 export interface Me {

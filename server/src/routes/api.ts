@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { AccountInput, ComposePayload, Me, MessageRef } from '../../../shared/types.js';
+import type { AccountInput, ActionResult, ComposePayload, Me, MessageRef } from '../../../shared/types.js';
 import type { Config } from '../config.js';
 import type { Keyring } from '../crypto.js';
 import type { Store, User } from '../db.js';
@@ -59,10 +59,13 @@ const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('delete') }),
 ]);
 
+const swipe = z.enum(['none', 'delete', 'archive', 'toggleRead', 'toggleFlag']);
 const prefsSchema = z.object({
   theme: z.enum(['system', 'light', 'dark']),
   pageSize: z.number().int().min(10).max(200),
   markReadOnOpen: z.boolean(),
+  swipeLeft: swipe,
+  swipeRight: swipe,
 });
 
 const composeSchema = z.object({
@@ -295,10 +298,14 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
         g.uids.push(m.uid);
         groups.set(k, g);
       }
+      const result: ActionResult = { undo: [], permanent: false, createdFolders: [] };
       for (const { ref, uids } of groups.values()) {
-        await mail.applyAction(userId, ref.accountId, ref.folder, ref.uidValidity, uids, body.action);
+        const r = await mail.applyAction(userId, ref.accountId, ref.folder, ref.uidValidity, uids, body.action);
+        if (r.undo) result.undo.push(r.undo);
+        if (r.permanent) result.permanent = true;
+        if (r.createdFolder) result.createdFolders.push(r.createdFolder);
       }
-      return { ok: true };
+      return result;
     } catch (err) {
       return sendError(reply, err);
     }

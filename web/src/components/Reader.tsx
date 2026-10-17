@@ -67,10 +67,11 @@ interface Props {
   onAction: (refs: MessageRef[], action: MessageAction) => void;
   onReply: (kind: ReplyKind, detail: MessageDetail) => void;
   onBack: () => void;
-  onStale: () => void;
+  /** The message is gone (404) or its folder's UIDVALIDITY changed (stale). */
+  onGone: (stale: boolean) => void;
 }
 
-export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnOpen, onAction, onReply, onBack, onStale }: Props) {
+export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnOpen, onAction, onReply, onBack, onGone }: Props) {
   const key = openRef ? refKey(openRef) : '';
   const [remote, setRemote] = useState(false);
   const [modeOverride, setModeOverride] = useState<'dark' | 'paper' | null>(null);
@@ -91,8 +92,8 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
   const d = q.data;
 
   useEffect(() => {
-    if (q.error instanceof ApiError && q.error.stale) onStale();
-  }, [q.error, onStale]);
+    if (q.error instanceof ApiError && (q.error.stale || q.error.status === 404)) onGone(q.error.stale);
+  }, [q.error, onGone]);
 
   // Mark as read when opened (once per message).
   useEffect(() => {

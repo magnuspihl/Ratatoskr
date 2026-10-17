@@ -1,6 +1,8 @@
 import { Archive, Flag, FolderInput, Mail, MailOpen, Menu, Paperclip, RefreshCw, Search, Star, Trash2, X, Reply } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import type { AccountFolders, AccountView, MessageAction, MessageSummary } from '../../../shared/types';
+import type { AccountFolders, AccountView, MessageAction, MessageSummary, SwipeAction } from '../../../shared/types';
+import type { Direction } from '../swipe';
+import { SwipeRow } from './SwipeRow';
 import { displayName, formatListDate, refKey } from '../util';
 import { MoveMenu } from './MoveMenu';
 
@@ -27,6 +29,12 @@ interface Props {
   onRefresh: () => void;
   onBulk: (action: MessageAction) => void;
   onNav: () => void;
+  lastOpenKey: string | null;
+  swipeLeft: SwipeAction;
+  swipeRight: SwipeAction;
+  swipeRemoves: (m: MessageSummary, dir: Direction) => boolean;
+  confirmSwipe: (m: MessageSummary, dir: Direction) => boolean;
+  onSwipe: (m: MessageSummary, dir: Direction) => void;
 }
 
 export function MessageList(p: Props) {
@@ -146,9 +154,16 @@ export function MessageList(p: Props) {
           const acc = p.accounts.get(m.accountId);
           const who = p.isSentLike ? `To: ${m.to.map(displayName).join(', ') || '(no recipients)'}` : displayName(m.from[0]) || '(unknown sender)';
           return (
-            <div
+            <SwipeRow
               key={key}
-              className={`row ${m.seen ? '' : 'unread'} ${p.openKey === key ? 'selected' : ''} ${p.checked.has(key) ? 'checked' : ''}`}
+              left={p.swipeLeft}
+              right={p.swipeRight}
+              seen={m.seen}
+              flagged={m.flagged}
+              removes={(d) => p.swipeRemoves(m, d)}
+              confirm={(d) => p.confirmSwipe(m, d)}
+              onSwipe={(d) => p.onSwipe(m, d)}
+              className={`row ${m.seen ? '' : 'unread'} ${p.openKey === key ? 'selected' : ''} ${p.lastOpenKey === key && p.openKey !== key ? 'recent' : ''} ${p.checked.has(key) ? 'checked' : ''}`}
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey) p.onCheck(m, !p.checked.has(key));
                 else p.onOpen(m);
@@ -174,7 +189,7 @@ export function MessageList(p: Props) {
                 </div>
                 {m.snippet && <div className="row-snippet">{m.snippet}</div>}
               </div>
-            </div>
+            </SwipeRow>
           );
         })}
         <div ref={sentinel} className="list-footer">

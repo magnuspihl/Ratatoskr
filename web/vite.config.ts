@@ -21,10 +21,12 @@ export default defineConfig(({ mode }) => {
     build: { outDir: path.join(root, 'dist/web'), emptyOutDir: true, sourcemap: false },
     server: {
       allowedHosts,
+      // Anchored patterns: only /api/* and /auth/* reach the backend; every other path falls
+      // through to Vite's SPA fallback (index.html), so client routes survive a reload.
       proxy: {
-        '/api/ws': { target: backend, ws: true },
-        '/api': { target: backend },
-        '/auth': { target: backend },
+        '^/api/ws$': { target: backend, ws: true },
+        '^/api/': { target: backend },
+        '^/auth/': { target: backend },
       },
     },
   };

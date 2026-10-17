@@ -1,8 +1,16 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { useState } from 'react';
-import type { Preferences } from '../../../shared/types';
+import type { Preferences, SwipeAction } from '../../../shared/types';
 import { api } from '../api';
+
+const SWIPE_OPTIONS: [SwipeAction, string][] = [
+  ['none', 'Nothing'],
+  ['archive', 'Archive'],
+  ['delete', 'Delete'],
+  ['toggleRead', 'Mark read / unread'],
+  ['toggleFlag', 'Flag / unflag'],
+];
 
 export function SettingsDialog({ prefs, onClose }: { prefs: Preferences; onClose: () => void }) {
   const qc = useQueryClient();
@@ -49,6 +57,20 @@ export function SettingsDialog({ prefs, onClose }: { prefs: Preferences; onClose
                 </option>
               ))}
             </select>
+          </div>
+          <div className="grid2">
+            {(['swipeRight', 'swipeLeft'] as const).map((key) => (
+              <div key={key}>
+                <label className="label">{key === 'swipeRight' ? 'Swipe right' : 'Swipe left'}</label>
+                <select className="select" value={v[key]} onChange={(e) => void save({ ...v, [key]: e.target.value as SwipeAction })}>
+                  {SWIPE_OPTIONS.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ))}
           </div>
           <label className="check">
             <input type="checkbox" checked={v.markReadOnOpen} onChange={(e) => void save({ ...v, markReadOnOpen: e.target.checked })} />

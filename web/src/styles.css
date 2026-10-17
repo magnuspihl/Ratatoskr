@@ -27,6 +27,10 @@
   --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.18);
   --message-bg: #ffffff;
   --link: #1a5fd0;
+  --swipe-delete: #d92d36;
+  --swipe-archive: #16a34a;
+  --swipe-read: #2563eb;
+  --swipe-flag: #d39a00;
   color-scheme: light;
 }
 
@@ -54,6 +58,10 @@
   --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.55);
   --message-bg: #1b1c1f;
   --link: #7cb4ff;
+  --swipe-delete: #b91c1c;
+  --swipe-archive: #15803d;
+  --swipe-read: #1d4ed8;
+  --swipe-flag: #b07d00;
   color-scheme: dark;
 }
 
@@ -161,14 +169,27 @@ svg { flex-shrink: 0; }
 .bulk-bar { display: flex; align-items: center; gap: 2px; padding: 6px 10px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
 .bulk-bar .count { flex: 1; font-size: 13px; font-weight: 600; padding-left: 4px; }
 .rows { flex: 1; overflow-y: auto; }
-.row {
-  position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 8px;
-  padding: 10px 14px 10px 10px; border-bottom: 1px solid var(--border);
-  cursor: pointer; user-select: none;
+.swipe { position: relative; overflow: hidden; touch-action: pan-y; border-bottom: 1px solid var(--border); }
+.swipe-bg {
+  position: absolute; inset: 0; display: flex; align-items: center; gap: 8px; padding: 0 22px;
+  color: #fff; font-weight: 600; font-size: 13px; transition: filter 0.12s;
 }
-.row:hover { background: var(--hover); }
-.row.selected { background: var(--active); }
-.row.checked { background: var(--accent-soft); }
+.swipe-bg.left { justify-content: flex-end; }
+.swipe-bg:not(.armed) { filter: saturate(0.35) brightness(0.92); }
+.swipe-bg svg { transition: transform 0.15s; }
+.swipe-bg.armed svg { transform: scale(1.2); }
+/* Rows are opaque (state tints layered over the surface) so the swipe background stays hidden at rest. */
+.row {
+  --tint: transparent;
+  position: relative; display: grid; grid-template-columns: 22px 1fr; gap: 8px;
+  padding: 10px 14px 10px 10px;
+  background: linear-gradient(var(--tint), var(--tint)), var(--surface);
+  cursor: pointer; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.row:hover { --tint: var(--hover); }
+.row.recent { --tint: var(--hover); }
+.row.selected { --tint: var(--active); }
+.row.checked { --tint: var(--accent-soft); }
 .row .acct-bar { position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 0 3px 3px 0; }
 .row-check { display: grid; place-items: start center; padding-top: 2px; }
 .row-check input { width: 15px; height: 15px; accent-color: var(--accent); margin: 0; opacity: 0.35; cursor: pointer; }
@@ -282,6 +303,8 @@ legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
 .toast-stack { position: fixed; z-index: 60; left: 50%; bottom: 20px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; align-items: center; }
 .toast { background: var(--text); color: var(--bg); padding: 9px 14px; border-radius: 9px; box-shadow: var(--shadow-lg); font-size: 13px; max-width: 90vw; }
 .toast.error { background: var(--danger); color: #fff; }
+.toast { display: flex; align-items: center; gap: 14px; }
+.toast button { border: 0; background: none; color: inherit; font-weight: 700; cursor: pointer; padding: 2px 4px; text-decoration: underline; text-underline-offset: 3px; }
 
 .login { display: grid; place-items: center; min-height: 100%; padding: 24px; background: radial-gradient(1200px 600px at 20% -10%, var(--accent-soft), transparent), var(--bg); }
 .login-card { width: min(380px, 100%); background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 32px; box-shadow: var(--shadow); text-align: center; display: flex; flex-direction: column; gap: 14px; }
@@ -296,13 +319,20 @@ legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
   .app { grid-template-columns: 220px minmax(280px, 340px) 1fr; }
 }
 @media (max-width: 860px) {
-  .app { grid-template-columns: 1fr; }
+  .app { grid-template-columns: 1fr; position: relative; }
   .mobile-only { display: inline-grid !important; }
-  .app .pane { display: none; }
-  .app[data-view='list'] .list, .app[data-view='reader'] .reader { display: flex; }
-  .app[data-view='nav'] .sidebar { display: flex; }
+  /* Hidden panes stay laid out (visibility, not display:none) so the list keeps its scroll
+     position while a message is open. */
+  .app .pane { position: absolute; inset: 0; visibility: hidden; pointer-events: none; }
+  .app[data-view='list'] .list, .app[data-view='reader'] .reader, .app[data-view='nav'] .sidebar {
+    visibility: visible; pointer-events: auto;
+  }
   .reader-body { padding: 14px; }
   .composer, .composer.maximized { inset: 0; width: auto; height: auto; border-radius: 0; }
   .grid2, .grid3 { grid-template-columns: 1fr; }
   .row-check input { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }

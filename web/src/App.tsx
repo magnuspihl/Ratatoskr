@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../shared/types';
 import { api, ApiError, type MailboxSel } from './api';
 import { AccountsDialog } from './components/AccountsDialog';
@@ -11,6 +11,9 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts } from './hooks';
 import { blankComposer, composerFor } from './replies';
+import { useRouter, type Location } from './router';
+import { HOME, listRoute, openMessageFolder, type Route } from './routing';
+import { removesFromList, swipeToAction, type Direction, type UndoStep } from './swipe';
 import { refKey, toRef } from './util';
 
 type MobileView = 'nav' | 'list' | 'reader';
@@ -24,15 +27,57 @@ export function App() {
   const accounts = useMemo(() => (loggedIn ? (accountsQ.data ?? []) : []), [accountsQ.data, loggedIn]);
   const accountMap = useMemo(() => new Map(accounts.map((a) => [a.id, a])), [accounts]);
   const folders = useFolders(loggedIn && accounts.length > 0);
-  const { toasts, push } = useToasts();
+  const { toasts, push, dismiss } = useToasts();
 
-  const [sel, setSel] = useState<MailboxSel>({ accountId: null, folder: 'INBOX' });
-  const [query, setQuery] = useState('');
-  const [open, setOpen] = useState<MessageRef | null>(null);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [composer, setComposer] = useState<ComposerInit | null>(null);
-  const [dialog, setDialog] = useState<'accounts' | 'settings' | null>(null);
-  const [view, setView] = useState<MobileView>('list');
+  const [lastOpenKey, setLastOpenKey] = useState<string | null>(null);
+  const composerDirty = useRef(false);
+  /** Entries pushed while the (non-modal) composer stayed open on top of them. */
+  const composeNavs = useRef(0);
+
+  // Browser Back/Forward: close the composer when leaving its entry; ignore stale overlay entries.
+  const onPop = useCallback((prev: Location, next: Location) => {
+    if (prev.state?.overlay === 'compose' && next.state?.overlay !== 'compose' && composerRef.current) {
+      if (composerDirty.current && !window.confirm('Discard this message?')) {
+        // Stay: put the compose entry back.
+        router.current.reopen('compose');
+        return;
+      }
+      setComposer(null);
+    }
+    composeNavs.current = Math.max(0, composeNavs.current - 1);
+    if (next.state?.overlay === 'compose' && !composerRef.current) router.current.clear();
+  }, []);
+  const { loc, navigate, openOverlay, closeOverlay, clearOverlay, back } = useRouter(onPop);
+  const composerRef = useRef(composer);
+  composerRef.current = composer;
+  const router = useRef({ reopen: openOverlay, clear: clearOverlay });
+  router.current = { reopen: (o) => openOverlay(o), clear: clearOverlay };
+
+  const route = loc.route;
+  const overlay = loc.state?.overlay;
+  const sel: MailboxSel = useMemo(() => ({ accountId: route.accountId, folder: route.folder }), [route.accountId, route.folder]);
+  const query = route.q;
+  const open: MessageRef | null = useMemo(
+    () => (route.open ? { accountId: route.open.accountId, folder: openMessageFolder(route), uid: route.open.uid, uidValidity: route.open.uidValidity } : null),
+    [route],
+  );
+  const dialog = overlay === 'settings' || overlay === 'accounts' ? overlay : null;
+  const view: MobileView = overlay === 'nav' ? 'nav' : open ? 'reader' : 'list';
+
+  useEffect(() => {
+    if (open) setLastOpenKey(refKey(open));
+  }, [open]);
+
+  /** Navigate, keeping a non-modal composer open on top of the new entry. */
+  const go = useCallback(
+    (r: Route, replace = false) => {
+      if (composerRef.current) composeNavs.current++;
+      navigate(r, { replace, keepOverlay: !!composerRef.current });
+    },
+    [navigate],
+  );
 
   // With a single account the unified view is just that account's inbox.
   const effectiveSel = useMemo<MailboxSel>(
@@ -45,6 +90,14 @@ export function App() {
 
   useLiveUpdates(loggedIn && accounts.length > 0);
 
+  // Deep link to an account that doesn't exist (any more): back to the unified inbox, quietly.
+  useEffect(() => {
+    if (accountsQ.isSuccess && route.accountId && !accountMap.has(route.accountId)) {
+      navigate(HOME, { replace: true });
+      push('That account no longer exists.');
+    }
+  }, [accountsQ.isSuccess, route.accountId, accountMap, navigate, push]);
+
   // UIDVALIDITY changed under an open cursor: start the list over.
   useEffect(() => {
     if (messagesQ.data?.pages.some((p) => p.reset)) void qc.resetQueries({ queryKey: ['messages'] });
@@ -52,8 +105,8 @@ export function App() {
 
   // First run: open the account dialog.
   useEffect(() => {
-    if (loggedIn && accountsQ.isSuccess && accounts.length === 0) setDialog('accounts');
-  }, [loggedIn, accountsQ.isSuccess, accounts.length]);
+    if (loggedIn && accountsQ.isSuccess && accounts.length === 0) openOverlay('accounts');
+  }, [loggedIn, accountsQ.isSuccess, accounts.length, openOverlay]);
 
   const runAction = useMessageAction(useCallback((m: string) => push(m, true), [push]));
   const currentFolders = effectiveSel.accountId ? folders.data?.find((f) => f.accountId === effectiveSel.accountId) : undefined;
@@ -64,10 +117,11 @@ export function App() {
     ? `${folderInfo?.specialUse === 'inbox' ? 'Inbox' : (folderInfo?.name ?? effectiveSel.folder)}${accounts.length > 1 ? ` · ${accountMap.get(effectiveSel.accountId)?.name ?? ''}` : ''}`
     : 'All inboxes';
 
+  /** Opening a message pushes an entry; switching to another one while open replaces it. */
   const openMessage = (m: MessageSummary) => {
-    setOpen(toRef(m));
-    setView('reader');
+    go({ ...route, open: { accountId: m.accountId, uidValidity: m.uidValidity, uid: m.uid } }, !!route.open);
   };
+  const setOpenRef = (r: MessageRef | null) => go({ ...route, open: r ? { accountId: r.accountId, uidValidity: r.uidValidity, uid: r.uid } : null }, true);
 
   /** Move the selection to the neighbour of `ref` (after archive/delete or j/k). */
   const neighbour = useCallback(
@@ -78,37 +132,97 @@ export function App() {
     [messages],
   );
 
-  const act = useCallback(
-    (refs: MessageRef[], action: MessageAction) => {
-      const removes = action.type === 'move' || action.type === 'archive' || action.type === 'delete';
-      if (removes && open && refs.some((r) => refKey(r) === refKey(open))) {
-        const next = neighbour(open, 1);
-        setOpen(next && !refs.some((r) => refKey(r) === refKey(next)) ? toRef(next) : null);
-        if (!next) setView('list');
-      }
-      if (removes) setChecked(new Set());
-      void runAction(refs, action);
+  const runUndo = useCallback(
+    async (steps: UndoStep[]) => {
+      for (const step of steps) await runAction(step.refs, step.action);
+      push('Undone');
     },
-    [open, neighbour, runAction],
+    [runAction, push],
   );
 
+  const act = useCallback(
+    async (refs: MessageRef[], action: MessageAction) => {
+      const removes = removesFromList(action);
+      if (removes && open && refs.some((r) => refKey(r) === refKey(open))) {
+        const next = neighbour(open, 1);
+        if (next && !refs.some((r) => refKey(r) === refKey(next))) setOpenRef(toRef(next));
+        else back(listRoute(route));
+      }
+      if (removes) setChecked(new Set());
+      const res = await runAction(refs, action);
+      if (!res.ok) return;
+      const n = refs.length;
+      const what = n === 1 ? 'Message' : `${n} messages`;
+      const label =
+        action.type === 'archive' ? `${what} archived` : action.type === 'delete' ? (res.result?.permanent ? `${what} deleted permanently` : `${what} moved to Trash`)
+          : action.type === 'move' ? `${what} moved to ${action.destination}` : null;
+      for (const f of res.result?.createdFolders ?? []) push(`Created folder "${f}" for archived mail.`);
+      const undo = res.undo;
+      if (label) push(label, false, undo ? { label: 'Undo', run: () => void runUndo(undo) } : undefined);
+      else if (undo && refs.length > 1) push(`${what} updated`, false, { label: 'Undo', run: () => void runUndo(undo) });
+      return undo;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [open, neighbour, runAction, runUndo, route, back, push],
+  );
+
+  /** Swipe actions: same as toolbar actions, with an undo toast for read/flag toggles too. */
+  const prefs = me.data?.preferences;
+  const swipeFor = (dir: Direction) => (dir === 'left' ? prefs?.swipeLeft : prefs?.swipeRight) ?? 'none';
+  const isTrash = (m: MessageSummary) =>
+    folders.data?.find((f) => f.accountId === m.accountId)?.folders.find((f) => f.path === m.folder)?.specialUse === 'trash';
+  const onSwipe = async (m: MessageSummary, dir: Direction) => {
+    const action = swipeToAction(swipeFor(dir), m);
+    if (!action) return;
+    const undo = await act([toRef(m)], action);
+    if (!removesFromList(action) && undo) {
+      const text =
+        action.type === 'seen' ? (action.value ? 'Marked as read' : 'Marked as unread') : action.type === 'flagged' ? (action.value ? 'Flagged' : 'Unflagged') : 'Done';
+      push(text, false, { label: 'Undo', run: () => void runUndo(undo) });
+    }
+  };
+
+
+  const startCompose = useCallback(
+    (init: ComposerInit) => {
+      setComposer(init);
+      composerDirty.current = false;
+      composeNavs.current = 0;
+      openOverlay('compose');
+    },
+    [openOverlay],
+  );
+  const compose = () => {
+    const account = (effectiveSel.accountId && accountMap.get(effectiveSel.accountId)) || accounts[0];
+    if (account) startCompose(blankComposer(account));
+  };
   const reply = useCallback(
     (kind: ReplyKind, d: MessageDetail) => {
       const account = accountMap.get(d.accountId);
-      if (account) setComposer(composerFor(kind, d, account));
+      if (account) startCompose(composerFor(kind, d, account));
     },
-    [accountMap],
+    [accountMap, startCompose],
   );
 
-  const compose = () => {
-    const account = (effectiveSel.accountId && accountMap.get(effectiveSel.accountId)) || accounts[0];
-    if (account) setComposer(blankComposer(account));
+  /** Close the composer from its own UI without leaving a dead history entry. */
+  const closeComposer = () => {
+    setComposer(null);
+    if (overlay === 'compose') {
+      if (composeNavs.current === 0) closeOverlay('compose');
+      else clearOverlay();
+    }
   };
 
-  const onStale = useCallback(() => {
-    setOpen(null);
-    void qc.resetQueries({ queryKey: ['messages'] });
-  }, [qc]);
+  // The open message is gone (deleted elsewhere) or its folder's UIDVALIDITY changed: fall back to
+  // the list with a quiet notice.
+  const onGone = useCallback(
+    (stale: boolean) => {
+      navigate(listRoute(route), { replace: true, keepOverlay: true });
+      push(stale ? 'This folder changed on the server; the list was reloaded.' : 'That message is no longer available.');
+      if (stale) void qc.resetQueries({ queryKey: ['messages'] });
+    },
+    [navigate, route, push, qc],
+  );
 
   // Keyboard shortcuts (ignored while typing).
   useEffect(() => {
@@ -124,7 +238,10 @@ export function App() {
           if (next && (!open || refKey(next) !== refKey(open))) {
             const idx = messages.indexOf(next);
             const curIdx = open ? messages.findIndex((m) => refKey(m) === refKey(open)) : -1;
-            if (!open || (e.key === 'j' ? idx > curIdx : idx < curIdx)) setOpen(toRef(next));
+            if (!open || (e.key === 'j' ? idx > curIdx : idx < curIdx)) {
+              if (open) setOpenRef(toRef(next));
+              else openMessage(next);
+            }
           }
           break;
         }
@@ -132,17 +249,17 @@ export function App() {
           compose();
           break;
         case 'e':
-          if (open) act([open], { type: 'archive' });
+          if (open) void act([open], { type: 'archive' });
           break;
         case '#':
         case 'Delete':
-          if (open) act([open], { type: 'delete' });
+          if (open) void act([open], { type: 'delete' });
           break;
         case 's':
-          if (open && cur) act([open], { type: 'flagged', value: !cur.flagged });
+          if (open && cur) void act([open], { type: 'flagged', value: !cur.flagged });
           break;
         case 'u':
-          if (open) act([open], { type: 'seen', value: false });
+          if (open) void act([open], { type: 'seen', value: false });
           break;
         case 'r':
         case 'a':
@@ -189,17 +306,19 @@ export function App() {
         folders={folders.data}
         sel={effectiveSel}
         onSelect={(s) => {
-          setSel(s);
-          setQuery('');
-          setOpen(null);
           setChecked(new Set());
-          setView('list');
+          // From the phone drawer, the folder replaces the drawer entry: Back then returns to the
+          // previous folder rather than reopening the drawer.
+          const r: Route = { accountId: s.accountId, folder: s.folder, q: '', open: null };
+          if (overlay === 'nav') navigate(r, { replace: true });
+          else go(r);
         }}
         onCompose={compose}
-        onAccounts={() => setDialog('accounts')}
-        onSettings={() => setDialog('settings')}
+        onAccounts={() => openOverlay('accounts')}
+        onSettings={() => openOverlay('settings')}
         onLogout={() => void logout()}
         userLabel={me.data!.name || me.data!.email}
+        onCloseNav={() => closeOverlay('nav')}
       />
       <MessageList
         title={title}
@@ -217,8 +336,9 @@ export function App() {
         checked={checked}
         query={query}
         onQuery={(q) => {
-          setQuery(q);
+          if (q === route.q) return;
           setChecked(new Set());
+          go({ ...route, q, open: null });
         }}
         onOpen={openMessage}
         onCheck={(m, on) =>
@@ -235,8 +355,17 @@ export function App() {
           void qc.invalidateQueries({ queryKey: ['messages'] });
           void qc.invalidateQueries({ queryKey: ['folders'] });
         }}
-        onBulk={(action) => act(messages.filter((m) => checked.has(refKey(m))).map(toRef), action)}
-        onNav={() => setView('nav')}
+        onBulk={(action) => void act(messages.filter((m) => checked.has(refKey(m))).map(toRef), action)}
+        onNav={() => openOverlay('nav')}
+        lastOpenKey={lastOpenKey}
+        swipeLeft={prefs?.swipeLeft ?? 'none'}
+        swipeRight={prefs?.swipeRight ?? 'none'}
+        swipeRemoves={(m, d) => {
+          const a = swipeToAction(swipeFor(d), m);
+          return !!a && removesFromList(a);
+        }}
+        confirmSwipe={(m, d) => swipeFor(d) !== 'delete' || !isTrash(m) || window.confirm('Delete this message permanently?')}
+        onSwipe={(m, d) => void onSwipe(m, d)}
       />
       <Reader
         openRef={open}
@@ -248,17 +377,18 @@ export function App() {
         }
         theme={theme}
         markReadOnOpen={me.data!.preferences.markReadOnOpen}
-        onAction={act}
+        onAction={(refs, a) => void act(refs, a)}
         onReply={reply}
-        onBack={() => setView('list')}
-        onStale={onStale}
+        onBack={() => back(listRoute(route))}
+        onGone={onGone}
       />
       {composer && (
         <Composer
           key={JSON.stringify(composer.answering ?? composer.replaceDraft ?? composer.subject)}
           init={composer}
           accounts={accounts}
-          onClose={() => setComposer(null)}
+          onClose={closeComposer}
+          dirtyRef={composerDirty}
           onToast={push}
           onSent={() => {
             void qc.invalidateQueries({ queryKey: ['messages'] });
@@ -266,12 +396,22 @@ export function App() {
           }}
         />
       )}
-      {dialog === 'accounts' && <AccountsDialog accounts={accounts} startWithNew={accounts.length === 0} onClose={() => setDialog(null)} />}
-      {dialog === 'settings' && <SettingsDialog prefs={me.data!.preferences} onClose={() => setDialog(null)} />}
-      <div className="toast-stack">
+      {dialog === 'accounts' && <AccountsDialog accounts={accounts} startWithNew={accounts.length === 0} onClose={() => closeOverlay('accounts')} />}
+      {dialog === 'settings' && <SettingsDialog prefs={me.data!.preferences} onClose={() => closeOverlay('settings')} />}
+      <div className="toast-stack" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.error ? 'error' : ''}`}>
-            {t.text}
+            <span>{t.text}</span>
+            {t.action && (
+              <button
+                onClick={() => {
+                  dismiss(t.id);
+                  t.action!.run();
+                }}
+              >
+                {t.action.label}
+              </button>
+            )}
           </div>
         ))}
       </div>

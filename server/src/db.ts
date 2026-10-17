@@ -42,7 +42,13 @@ const MIGRATIONS: string[] = [
    );`,
 ];
 
-export const DEFAULT_PREFERENCES: Preferences = { theme: 'system', pageSize: 50, markReadOnOpen: true };
+export const DEFAULT_PREFERENCES: Preferences = {
+  theme: 'system',
+  pageSize: 50,
+  markReadOnOpen: true,
+  swipeLeft: 'delete',
+  swipeRight: 'archive',
+};
 
 export interface User {
   id: string;

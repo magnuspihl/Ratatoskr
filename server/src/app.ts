@@ -31,6 +31,18 @@ export const APP_CSP = [
   "object-src 'none'",
 ].join('; ');
 
+/**
+ * Client-side routes (e.g. /mail/<account>/<folder>) are served the SPA shell. Only browser
+ * navigations qualify (GET/HEAD asking for HTML), and never anything under /api or /auth, so API
+ * typos still get a JSON 404 and missing assets aren't answered with HTML.
+ */
+export function isSpaRequest(method: string, url: string, accept: string | undefined): boolean {
+  if (method !== 'GET' && method !== 'HEAD') return false;
+  const path = url.split('?')[0]!;
+  if (/^\/(api|auth)(\/|$)/.test(path) || path === '/healthz') return false;
+  return (accept ?? '').includes('text/html');
+}
+
 export interface App {
   app: FastifyInstance;
   store: Store;
@@ -81,7 +93,7 @@ export async function buildApp(config: Config, opts: { store?: Store; logger?: b
   if (fs.existsSync(path.join(config.webDir, 'index.html'))) {
     await app.register(fastifyStatic, { root: config.webDir, wildcard: false, index: ['index.html'] });
     app.setNotFoundHandler((req, reply) => {
-      if (req.method === 'GET' && !req.url.startsWith('/api/') && !req.url.startsWith('/auth/')) {
+      if (isSpaRequest(req.method, req.url, req.headers.accept)) {
         return reply.header('cache-control', 'no-cache').sendFile('index.html');
       }
       return reply.code(404).send({ error: 'Not found' });

@@ -1,6 +1,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
+import type { ActionResult, ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
+import { undoPlan, type UndoStep } from './swipe';
 import { api, type MailboxSel } from './api';
 import { refKey } from './util';
 
@@ -45,15 +46,25 @@ export function useMessageCache() {
   );
 }
 
-/** Run a message action with an optimistic cache update and a refetch afterwards. */
+/**
+ * Run a message action with an optimistic cache update and a refetch afterwards. Resolves with a
+ * plan to undo it (null if it failed or can't be undone).
+ */
 export function useMessageAction(onError: (msg: string) => void) {
   const qc = useQueryClient();
   const update = useMessageCache();
   return useCallback(
-    async (refs: MessageRef[], action: MessageAction) => {
-      if (refs.length === 0) return;
+    async (refs: MessageRef[], action: MessageAction): Promise<{ ok: boolean; result: ActionResult | null; undo: UndoStep[] | null }> => {
+      if (refs.length === 0) return { ok: true, result: null, undo: null };
       const keys = new Set(refs.map(refKey));
       const hit = (m: MessageSummary) => keys.has(refKey(m));
+
+      // Previous flag values, so read/flag changes can be undone exactly.
+      const before = new Map<string, MessageSummary>();
+      for (const [, data] of qc.getQueriesData<MessagesData>({ queryKey: ['messages'] })) {
+        for (const p of data?.pages ?? []) for (const m of p.messages) if (hit(m)) before.set(refKey(m), m);
+      }
+
       if (action.type === 'seen' || action.type === 'flagged') {
         const field = action.type;
         update((m) => (hit(m) ? { ...m, [field]: action.value } : m));
@@ -63,9 +74,16 @@ export function useMessageAction(onError: (msg: string) => void) {
         );
       } else update((m) => (hit(m) ? null : m));
       try {
-        await api.action(refs, action);
+        const result = await api.action(refs, action);
+        const undo = undoPlan(action, refs, result, (r) => {
+          const m = before.get(refKey(r));
+          if (!m) return undefined;
+          return action.type === 'seen' ? m.seen : action.type === 'flagged' ? m.flagged : undefined;
+        });
+        return { ok: true, result, undo };
       } catch (err) {
         onError((err as Error).message);
+        return { ok: false, result: null, undo: null };
       } finally {
         void qc.invalidateQueries({ queryKey: ['messages'] });
         void qc.invalidateQueries({ queryKey: ['folders'] });
@@ -136,12 +154,23 @@ export function useTheme(pref: Preferences['theme'] | undefined): ResolvedTheme 
   return theme;
 }
 
+export interface Toast {
+  id: number;
+  text: string;
+  error: boolean;
+  action?: { label: string; run: () => void };
+}
+
 export function useToasts() {
-  const [toasts, setToasts] = useState<{ id: number; text: string; error: boolean }[]>([]);
-  const push = useCallback((text: string, error = false) => {
-    const id = Date.now() + Math.random();
-    setToasts((t) => [...t, { id, text, error }]);
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), error ? 6000 : 3500);
-  }, []);
-  return { toasts, push };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const dismiss = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
+  const push = useCallback(
+    (text: string, error = false, action?: Toast['action']) => {
+      const id = Date.now() + Math.random();
+      setToasts((t) => [...t.slice(-3), { id, text, error, action }]);
+      window.setTimeout(() => dismiss(id), action ? 7000 : error ? 6000 : 3500);
+    },
+    [dismiss],
+  );
+  return { toasts, push, dismiss };
 }
