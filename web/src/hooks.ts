@@ -17,6 +17,8 @@ export function useMessages(sel: MailboxSel, q: string, enabled: boolean) {
     getNextPageParam: (last) => last.cursor,
     enabled,
     staleTime: 20_000,
+    // INBOX changes arrive via IDLE; this also catches changes in other folders.
+    refetchInterval: 120_000,
   });
 }
 
