@@ -6,7 +6,7 @@ import { AccountsDialog } from './components/AccountsDialog';
 import { Composer, type ComposerInit } from './components/Composer';
 import { Login } from './components/Login';
 import { MessageList } from './components/MessageList';
-import { Reader, type ReplyKind } from './components/Reader';
+import { quotableDetail, Reader, type ReplyKind } from './components/Reader';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts } from './hooks';
@@ -285,8 +285,9 @@ export function App() {
         case 'a':
         case 'f': {
           if (!open) break;
-          const d = qc.getQueryData<MessageDetail>(['message', refKey(open), false]);
-          if (d) reply(e.key === 'r' ? 'reply' : e.key === 'a' ? 'replyAll' : 'forward', d);
+          const d = qc.getQueryData<MessageDetail>(['message', refKey(open), 'auto']);
+          const kind = e.key === 'r' ? 'reply' : e.key === 'a' ? 'replyAll' : 'forward';
+          if (d) void quotableDetail(qc, d).then((quoted) => reply(kind, quoted), (err: Error) => push(err.message, true));
           break;
         }
         case 'Escape':

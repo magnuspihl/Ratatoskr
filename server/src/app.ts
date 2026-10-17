@@ -13,6 +13,7 @@ import { Store } from './db.js';
 import { MailService } from './imap/mail.js';
 import { ImapPool } from './imap/pool.js';
 import { ComposeService } from './mail/send.js';
+import type { RemoteImage } from './net/remoteImages.js';
 import { registerApiRoutes } from './routes/api.js';
 import { registerWebSocket } from './routes/ws.js';
 
@@ -49,7 +50,10 @@ export interface App {
   pool: ImapPool;
 }
 
-export async function buildApp(config: Config, opts: { store?: Store; logger?: boolean } = {}): Promise<App> {
+export async function buildApp(
+  config: Config,
+  opts: { store?: Store; logger?: boolean; fetchImage?: (url: string) => Promise<RemoteImage> } = {},
+): Promise<App> {
   const app = Fastify({
     logger: opts.logger === false ? false : { level: config.logLevel },
     trustProxy: config.trustProxy,
@@ -86,7 +90,7 @@ export async function buildApp(config: Config, opts: { store?: Store; logger?: b
   app.get('/healthz', async () => ({ ok: true }));
 
   await registerAuthRoutes(app, config, store, sessions);
-  await registerApiRoutes(app, { config, store, sessions, pool, mail, compose });
+  await registerApiRoutes(app, { config, store, sessions, pool, mail, compose, fetchImage: opts.fetchImage });
   await registerWebSocket(app, config, store, sessions, pool);
 
   // Static frontend (production build). In development Vite serves the UI and proxies /api.

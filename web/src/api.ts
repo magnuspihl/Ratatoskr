@@ -4,6 +4,7 @@ import type {
   AccountInput,
   AccountView,
   ComposePayload,
+  DomainName,
   DraftResult,
   ListResponse,
   Me,
@@ -57,6 +58,8 @@ export interface MailboxSel {
   folder: string;
 }
 
+export type RemoteMode = 'auto' | 'load' | 'block';
+
 export const api = {
   me: () => request<Me>('GET', '/api/me'),
   savePreferences: (p: Preferences) => request<Preferences>('PUT', '/api/preferences', p),
@@ -81,12 +84,18 @@ export const api = {
     if (unread) p.set('unread', '1');
     return request<ListResponse>('GET', `/api/messages?${p.toString()}`);
   },
-  message: (r: MessageRef, remote: boolean) => request<MessageDetail>('GET', `/api/message?${refQuery(r)}${remote ? '&remote=1' : ''}`),
+  /** auto: the server applies the sender-domain allowlist; load / block: override it. */
+  message: (r: MessageRef, remote: RemoteMode) =>
+    request<MessageDetail>('GET', `/api/message?${refQuery(r)}${remote === 'auto' ? '' : `&remote=${remote === 'load' ? 1 : 0}`}`),
   attachmentUrl: (r: MessageRef, index: number) => `/api/attachment?${refQuery(r)}&index=${index}`,
   action: (messages: MessageRef[], action: MessageAction) => request<ActionResult>('POST', '/api/messages/actions', { messages, action }),
 
   send: (payload: ComposePayload, files: File[]) => request<SendResult>('POST', '/api/send', composeForm(payload, files)),
   saveDraft: (payload: ComposePayload, files: File[]) => request<DraftResult>('POST', '/api/drafts', composeForm(payload, files)),
+  imageDomains: () => request<DomainName[]>('GET', '/api/image-domains'),
+  addImageDomain: (domain: string) => request<DomainName[]>('POST', '/api/image-domains', { domain }),
+  removeImageDomain: (domain: string) => request<DomainName[]>('DELETE', `/api/image-domains/${encodeURIComponent(domain)}`),
+
   recipients: (q: string) => request<{ name: string; address: string }[]>('GET', `/api/recipients?q=${encodeURIComponent(q)}`),
 };
 

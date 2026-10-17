@@ -210,7 +210,7 @@ export function Composer({ init, accounts, onClose, onToast, onSent, dirtyRef }:
         // Attachments now live in the saved draft (the previous one was replaced), so future
         // saves and the final send carry them over from there.
         if (files.length || fwd.length) {
-          const saved = await api.message(res.draft, false);
+          const saved = await api.message(res.draft, 'block');
           setFwdSource(res.draft);
           setFwd(saved.attachments.filter((a) => !a.inline));
           setFiles([]);

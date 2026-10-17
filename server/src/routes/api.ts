@@ -6,7 +6,8 @@ import type { Store, User } from '../db.js';
 import { MailServerError, testConnection } from '../imap/connect.js';
 import { MessageGoneError, StaleError, type ListSource, type MailService } from '../imap/mail.js';
 import { NotFoundError, type ImapPool } from '../imap/pool.js';
-import { RemoteImageCache } from '../net/remoteImages.js';
+import { RemoteImageCache, type RemoteImage } from '../net/remoteImages.js';
+import { displayDomain, MAX_ALLOWED_DOMAINS, normaliseDomain } from '../mail/imageAllowlist.js';
 import type { Sessions } from '../auth/session.js';
 import { ComposeError, type ComposeService } from '../mail/send.js';
 
@@ -106,10 +107,12 @@ export interface ApiDeps {
   pool: ImapPool;
   mail: MailService;
   compose: ComposeService;
+  /** Replaces the real remote image fetcher (tests only). */
+  fetchImage?: (url: string) => Promise<RemoteImage>;
 }
 
 export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
-  const { config, store, sessions, pool, mail, compose } = deps;
+  const { config, store, sessions, pool, mail, compose, fetchImage } = deps;
 
   app.decorateRequest('user', null);
 
@@ -147,6 +150,41 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       const prefs = prefsSchema.parse(req.body);
       store.setPreferences(uid(req), prefs);
       return prefs;
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  // ---- sender domains allowed to show images ----------------------------------
+
+  const domainBody = z.object({ domain: z.string().max(400) });
+  const parseDomain = (raw: string) => {
+    const domain = normaliseDomain(raw);
+    if (!domain) throw new ComposeError('Not a valid domain name');
+    return domain;
+  };
+  const listDomains = (userId: string) => store.listImageDomains(userId).map(displayDomain);
+
+  app.get('/api/image-domains', async (req) => listDomains(uid(req)));
+
+  app.post('/api/image-domains', async (req, reply) => {
+    try {
+      const domain = parseDomain(domainBody.parse(req.body).domain);
+      if (!store.addImageDomain(uid(req), domain, MAX_ALLOWED_DOMAINS)) {
+        throw new ComposeError(`You can allow at most ${MAX_ALLOWED_DOMAINS} domains`);
+      }
+      return listDomains(uid(req));
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.delete<{ Params: { domain: string } }>('/api/image-domains/:domain', async (req, reply) => {
+    try {
+      if (!store.removeImageDomain(uid(req), parseDomain(req.params.domain))) {
+        return reply.code(404).send({ error: 'Domain not in the list' });
+      }
+      return listDomains(uid(req));
     } catch (err) {
       return sendError(reply, err);
     }
@@ -251,11 +289,15 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
 
   app.get('/api/message', async (req, reply) => {
     try {
+      // remote=1: the user asked to load images; remote=0: keep them blocked (e.g. for quoting);
+      // absent: the server decides from the user's sender-domain allowlist.
       const q = refSchema.extend({ remote: z.enum(['0', '1']).optional() }).parse(req.query);
       requireAccount(uid(req), q.accountId);
       const detail = await mail.getMessage(uid(req), q, {
-        allowRemote: q.remote === '1',
+        allowRemote: q.remote === undefined ? undefined : q.remote === '1',
+        imageDomains: q.remote === undefined ? store.listImageDomains(uid(req)) : [],
         imageCache,
+        fetchImage,
         maxBytes: config.maxMessageBytes,
       });
       reply.header('cache-control', 'private, no-store');

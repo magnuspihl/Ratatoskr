@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import {
   Archive,
   ArrowLeft,
@@ -7,6 +7,7 @@ import {
   Flag,
   FolderInput,
   Forward,
+  Image as ImageIcon,
   ImageOff,
   Mail,
   MailOpen,
@@ -17,7 +18,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { AccountFolders, AccountView, MessageAction, MessageDetail, MessageRef } from '../../../shared/types';
+import type { AccountFolders, AccountView, DomainName, MessageAction, MessageDetail, MessageRef } from '../../../shared/types';
 import { api, ApiError } from '../api';
 import type { ResolvedTheme } from '../hooks';
 import { avatarColor, displayName, formatFullDate, formatSize, initials, refKey } from '../util';
@@ -57,6 +58,15 @@ function TextBody({ text }: { text: string }) {
 
 export type ReplyKind = 'reply' | 'replyAll' | 'forward' | 'editDraft';
 
+/**
+ * The version of a message to quote in a reply/forward: without remote images, so downloaded
+ * remote content (e.g. tracking pixels) isn't embedded in outgoing mail.
+ */
+export async function quotableDetail(qc: QueryClient, d: MessageDetail): Promise<MessageDetail> {
+  if (!d.remoteContentLoaded) return d;
+  return qc.fetchQuery({ queryKey: ['message', refKey(d), 'block'], queryFn: () => api.message(d, 'block'), staleTime: 5 * 60_000 });
+}
+
 interface Props {
   openRef: MessageRef | null;
   account: AccountView | undefined;
@@ -76,16 +86,19 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
   const [remote, setRemote] = useState(false);
   const [modeOverride, setModeOverride] = useState<'dark' | 'paper' | null>(null);
   const [showText, setShowText] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
   useEffect(() => {
     setRemote(false);
     setModeOverride(null);
     setShowText(false);
+    setLocalError(null);
   }, [key]);
 
   const qc = useQueryClient();
   const q = useQuery({
-    queryKey: ['message', key, remote],
-    queryFn: () => api.message(openRef!, remote),
+    queryKey: ['message', key, remote ? 'load' : 'auto'],
+    queryFn: () => api.message(openRef!, remote ? 'load' : 'auto'),
     enabled: !!openRef,
     staleTime: 5 * 60_000,
     retry: (n, err) => !(err instanceof ApiError && err.status < 500) && n < 1,
@@ -125,9 +138,24 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
   }
 
   const ref = openRef;
-  // Reply/forward quote the version without remote images, so downloaded remote content (e.g.
-  // tracking pixels) isn't embedded in outgoing mail.
-  const quotable = (detail: MessageDetail) => (remote ? (qc.getQueryData<MessageDetail>(['message', key, false]) ?? detail) : detail);
+  const replyWith = (kind: ReplyKind, detail: MessageDetail) =>
+    void quotableDetail(qc, detail).then(
+      (quoted) => onReply(kind, quoted),
+      (err: Error) => setLocalError(err.message),
+    );
+  // Add or remove a sender domain on the image allowlist, then refetch so the server re-decides.
+  const changeAllowlist = async (change: () => Promise<DomainName[]>) => {
+    setBusy(true);
+    setLocalError(null);
+    try {
+      qc.setQueryData(['imageDomains'], await change());
+      await qc.invalidateQueries({ queryKey: ['message'] });
+    } catch (err) {
+      setLocalError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const seen = d?.seen ?? true;
   const flagged = d?.flagged ?? false;
 
@@ -138,18 +166,18 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
           <ArrowLeft size={18} />
         </button>
         {isDrafts ? (
-          <button className="btn" disabled={!d} onClick={() => d && onReply('editDraft', quotable(d))}>
+          <button className="btn" disabled={!d} onClick={() => d && replyWith('editDraft', d)}>
             <PenSquare size={15} /> Edit draft
           </button>
         ) : (
           <>
-            <button className="icon-btn" title="Reply (r)" disabled={!d} onClick={() => d && onReply('reply', quotable(d))}>
+            <button className="icon-btn" title="Reply (r)" disabled={!d} onClick={() => d && replyWith('reply', d)}>
               <Reply size={17} />
             </button>
-            <button className="icon-btn" title="Reply all (a)" disabled={!d} onClick={() => d && onReply('replyAll', quotable(d))}>
+            <button className="icon-btn" title="Reply all (a)" disabled={!d} onClick={() => d && replyWith('replyAll', d)}>
               <ReplyAll size={17} />
             </button>
-            <button className="icon-btn" title="Forward (f)" disabled={!d} onClick={() => d && onReply('forward', quotable(d))}>
+            <button className="icon-btn" title="Forward (f)" disabled={!d} onClick={() => d && replyWith('forward', d)}>
               <Forward size={17} />
             </button>
           </>
@@ -177,6 +205,7 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
           </div>
         )}
         {q.error && <div className="banner error">{(q.error as Error).message}</div>}
+        {localError && <div className="banner error">{localError}</div>}
         {d && (
           <>
             <h2 className="msg-subject">{d.subject || '(no subject)'}</h2>
@@ -197,17 +226,45 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
               <div className="msg-date">{formatFullDate(d.date)}</div>
             </div>
 
-            {d.html && (d.remoteContentBlocked > 0 || theme === 'dark' || d.text) && (
+            {d.html && (d.remoteContentBlocked > 0 || d.imagesAllowedBy || theme === 'dark' || d.text) && (
               <div className="notice">
-                {d.remoteContentBlocked > 0 && !remote ? (
+                {d.remoteContentBlocked > 0 && !d.remoteContentLoaded ? (
                   <>
                     <ImageOff size={16} />
                     <span className="grow">
-                      Remote content blocked ({d.remoteContentBlocked}) to protect your privacy.
+                      {d.allowlistSkipped === 'dmarc-fail' && d.senderDomain
+                        ? `Images not loaded automatically: this message failed the sender check (DMARC) for ${d.senderDomain.display}.`
+                        : `Remote content blocked (${d.remoteContentBlocked}) to protect your privacy.`}
                     </span>
                     <button className="btn" onClick={() => setRemote(true)}>
                       Load images
                     </button>
+                    {d.senderDomain && !d.allowlistSkipped && (
+                      <button
+                        className="btn ghost"
+                        disabled={busy}
+                        title="Always load remote images in mail from this domain and its subdomains"
+                        onClick={() => void changeAllowlist(() => api.addImageDomain(d.senderDomain!.domain))}
+                      >
+                        Always load from {d.senderDomain.display}
+                      </button>
+                    )}
+                  </>
+                ) : d.imagesAllowedBy && !remote ? (
+                  <>
+                    <ImageIcon size={16} />
+                    <span className="grow">
+                      Images loaded automatically from {d.imagesAllowedBy.display}
+                      {d.remoteContentBlocked > 0 && ` (${d.remoteContentBlocked} couldn't be loaded)`} ·{' '}
+                      <button
+                        className="link-btn"
+                        disabled={busy}
+                        title={`Stop loading images automatically from ${d.imagesAllowedBy.display}`}
+                        onClick={() => void changeAllowlist(() => api.removeImageDomain(d.imagesAllowedBy!.domain))}
+                      >
+                        Stop
+                      </button>
+                    </span>
                   </>
                 ) : (
                   <span className="grow">

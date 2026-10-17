@@ -12,9 +12,10 @@ import type {
   SpecialUse,
   UndoInfo,
 } from '../../../shared/types.js';
+import { decideRemoteImages, displayDomain } from '../mail/imageAllowlist.js';
 import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
 import { collectRemoteImageUrls } from '../mail/sanitize.js';
-import { inlineRemoteImages, type RemoteImageCache } from '../net/remoteImages.js';
+import { inlineRemoteImages, type InlineOptions, type RemoteImageCache } from '../net/remoteImages.js';
 import { MailServerError, describeError } from './connect.js';
 import type { ImapPool } from './pool.js';
 import { findTextPart, hasAttachments, SNIPPET_FETCH_BYTES, snippetFromPart, type TextPart } from './snippet.js';
@@ -428,19 +429,39 @@ export class MailService {
   async getMessage(
     userId: string,
     ref: MessageRef,
-    opts: { allowRemote: boolean; maxBytes: number; imageCache?: RemoteImageCache },
+    opts: {
+      /** true = load remote images, false = keep them blocked, undefined = per the sender-domain allowlist. */
+      allowRemote: boolean | undefined;
+      imageDomains?: readonly string[];
+      maxBytes: number;
+      imageCache?: RemoteImageCache;
+      fetchImage?: InlineOptions['fetchImage'];
+    },
   ): Promise<MessageDetail> {
     const { raw, flags, internalDate } = await this.fetchRaw(userId, ref, opts.maxBytes);
     const email = await parseRaw(raw);
+    const decision = decideRemoteImages(email, opts.allowRemote, opts.imageDomains ?? []);
     // Remote images are fetched here and inlined as data: URIs; the browser never fetches them.
     let inlined = new Map<string, string | null>();
-    if (opts.allowRemote && email.html) {
-      inlined = await inlineRemoteImages(collectRemoteImageUrls(email.html), { userId, cache: opts.imageCache });
+    if (decision.load && email.html) {
+      inlined = await inlineRemoteImages(collectRemoteImageUrls(email.html), {
+        userId,
+        cache: opts.imageCache,
+        fetchImage: opts.fetchImage,
+      });
     }
     return buildMessageDetail(
       email,
       { ...ref, flags, internalDate },
-      { allowRemote: opts.allowRemote, resolveRemote: (u) => inlined.get(u) ?? null },
+      {
+        allowRemote: decision.load,
+        resolveRemote: (u) => inlined.get(u) ?? null,
+        allowlist: {
+          senderDomain: decision.senderDomain ? displayDomain(decision.senderDomain) : null,
+          allowedBy: decision.allowedBy ? displayDomain(decision.allowedBy) : null,
+          skipped: decision.skipped,
+        },
+      },
     );
   }
 
