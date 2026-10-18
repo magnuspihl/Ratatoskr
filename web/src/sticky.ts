@@ -44,7 +44,7 @@ export function updateSticky(
   const next = new Set(current);
   if (action.type === 'seen' && action.value === true) for (const k of keys) next.add(k);
   // Marked unread again: the server returns it anyway. Moved/deleted: it must really go away.
-  else if (action.type === 'seen' || action.type === 'move' || action.type === 'archive' || action.type === 'delete') {
+  else if (['seen', 'move', 'archive', 'delete', 'snooze', 'unsnooze'].includes(action.type)) {
     for (const k of keys) next.delete(k);
   }
   return next;

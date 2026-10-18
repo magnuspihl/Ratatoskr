@@ -5,7 +5,8 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 - **Thin client.** Your IMAP/SMTP servers stay the source of truth. Ratatoskr has no local mail
   store, no message cache and no sync engine. The only state it keeps is users, their encrypted
   account settings and preferences (plus, for notifications, push subscriptions and the newest
-  INBOX UID already notified about), in one SQLite file.
+  INBOX UID already notified about, and for snoozed mail, folder, UID and wake-up time), in one
+  SQLite file.
 - **One container.** Configured by environment variables, with a volume for the SQLite file. No
   Redis, no Postgres, no sidecars.
 - **Modern UI.** Clean three-pane layout, first-class dark mode, usable on a phone.
@@ -29,6 +30,8 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
   sender's domain (and its subdomains) to a per-user list whose mail loads images automatically;
   manage the list in Settings.
 - Mark read/unread, flag, move, archive, delete (to Trash, expunge only from Trash), multi-select.
+- Snooze: hide a message until a date and time you pick (or Later today / Tomorrow / This weekend /
+  Next week). See [Snooze](#snooze).
 - Compose, reply, reply-all, and forward (with the original attachments). Includes a light
   rich-text editor, an automatic plain-text alternative, attachments, drafts (saved to the
   account's Drafts folder), a copy in Sent, and recipient autocomplete from recently used
@@ -41,7 +44,7 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 - Notifications for new mail on phones and desktops (Web Push), and an unread badge on the app
   icon. Install Ratatoskr as an app (PWA) from the browser; see [Notifications](#notifications).
 - Keyboard shortcuts: `j`/`k` to move, `r` reply, `a` reply all, `f` forward, `e` archive,
-  `#` delete, `s` flag, `u` mark unread, `c` compose, `Ctrl/Cmd+Enter` to send.
+  `b` snooze, `#` delete, `s` flag, `u` mark unread, `c` compose, `Ctrl/Cmd+Enter` to send.
 
 ## Quick start (Docker)
 
@@ -121,6 +124,27 @@ remembers the newest INBOX UID it has notified about, so after a restart it repo
 arrived while it was down, but never old mail when notifications are switched on. Subscriptions
 that the push service reports as expired are removed automatically. Signing out stops
 notifications on that device.
+
+### Snooze
+
+Snoozing moves a message to the account's **Snoozed** folder until the time you pick. Ratatoskr
+uses the folder the server marks as Snoozed (the IMAP `\Snoozed` attribute from RFC 9979), or a
+folder named "Snoozed", and creates one if there is none. IMAP has no way to store *when* a message
+should come back, so Ratatoskr keeps the wake-up time in its database and runs the timer itself.
+
+When the time comes, the message goes back to INBOX as unread, with the current time as its arrival
+date, so it is at the top of the list. Messages larger than `RATATOSKR_MAX_MESSAGE_MB` are moved
+back as they are and keep their old date. Then:
+
+- your devices with notifications on get a "Back from snooze" notification (same content setting
+  as for new mail; nothing while the app is open and in front of you);
+- open browser windows show a notice with a link to the message.
+
+In the Snoozed folder each message shows when it comes back. Open one to **Unsnooze** it (back to
+the inbox right away) or snooze it again to change the time. A snooze can be undone from the
+notice that confirms it. Snoozes that came due while the server was down are handled when it
+starts. A message you move out of the Snoozed folder yourself, in Ratatoskr or another mail app,
+stays where you put it.
 
 ### OIDC setup
 
@@ -239,7 +263,7 @@ logins always return to that one host.
 | Command | What it does |
 | --- | --- |
 | `npm run typecheck` | Type-check server and web client. |
-| `npm test` | Unit tests: sanitizer (hostile fixtures), MIME parsing, credential encryption, SSRF guards, unified-inbox merging, Web Push encryption (RFC 8291 test vector) and notifications. |
+| `npm test` | Unit tests: sanitizer (hostile fixtures), MIME parsing, credential encryption, SSRF guards, unified-inbox merging, Web Push encryption (RFC 8291 test vector), notifications and snooze scheduling. |
 | `npm run test:integration` | Starts a throwaway [GreenMail](https://greenmail-mail-test.github.io/greenmail/) container (Docker), runs the full HTTP API against real IMAP/SMTP, and removes the container. |
 | `npm run build` | Compiles the server to `dist/server` and the web client to `dist/web`. |
 | `npm start` | Runs the production build. |
@@ -255,6 +279,7 @@ server/src
   imap/mail.ts      Folders, unified listing (k-way merge with per-account UID cursors), actions
   mail/sanitize.ts  HTML sanitizer; mail/css.ts CSS sanitizer
   mail/compose.ts   MIME building (Nodemailer MailComposer); mail/send.ts SMTP + Sent/Drafts
+  mail/snooze.ts    Snoozed folder, wake-up timer, putting mail back into INBOX
   net/              SSRF guards and the server-side remote image fetcher
 shared/             Types and the sandboxed iframe document builder (used by both sides)
 web/src             React + TanStack Query client
@@ -271,6 +296,9 @@ actions carry the UIDVALIDITY too and are refused (HTTP 409) if it no longer mat
 - Live updates (IDLE) cover each account's INBOX. Other folders refresh when you open them, when
   the window regains focus, and every couple of minutes.
 - Sent copies are appended without the Bcc header.
+- Snoozing is a Ratatoskr feature: other mail apps see the messages in the Snoozed folder, but only
+  Ratatoskr brings them back, and only while it is running (late ones come back when it starts).
+  A woken message is a new copy in INBOX, so it gets a new UID.
 - No OAuth2 IMAP (XOAUTH2 for Gmail/Microsoft 365). Use app passwords where the provider
   supports them.
 - Out of scope: server-side filters, calendar/contacts, JMAP, PGP, local full-text search.

@@ -386,3 +386,13 @@ legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* ---- snooze ----------------------------------------------------------------- */
+.snooze-menu { min-width: 250px; }
+.snooze-menu .grow { flex: 1; }
+.snooze-menu button .muted { font-size: 12px; font-variant-numeric: tabular-nums; }
+.snooze-custom { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px 6px; border-top: 1px solid var(--border); margin-top: 4px; }
+.snooze-custom .menu-label { padding: 4px 4px 0; }
+.menu .snooze-custom .btn.primary { justify-content: center; background: var(--accent); }
+.menu .snooze-custom .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+.row-date.snoozed { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); }

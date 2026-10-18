@@ -1,10 +1,12 @@
-import { Archive, Flag, FolderInput, Mail, MailCheck, MailOpen, Menu, Paperclip, RefreshCw, Search, Star, Trash2, X, Reply } from 'lucide-react';
+import { AlarmClock, Archive, Flag, FolderInput, Mail, MailCheck, MailOpen, Menu, Paperclip, RefreshCw, Search, Star, Trash2, X, Reply } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import type { AccountFolders, AccountView, MessageAction, MessageSummary, SwipeAction } from '../../../shared/types';
 import type { Direction } from '../swipe';
 import { SwipeRow } from './SwipeRow';
 import { displayName, formatListDate, refKey } from '../util';
 import { MoveMenu } from './MoveMenu';
+import { SnoozeMenu } from './SnoozeMenu';
+import { formatSnoozeTime } from '../snooze';
 
 interface Props {
   title: string;
@@ -123,6 +125,7 @@ export function MessageList(p: Props) {
           <button className="icon-btn" title="Archive" onClick={() => p.onBulk({ type: 'archive' })}>
             <Archive size={16} />
           </button>
+          <SnoozeMenu iconSize={16} onSnooze={(until) => p.onBulk({ type: 'snooze', until: until.toISOString() })} />
           <MoveMenu
             disabled={!sameAccount}
             account={sameAccount ? p.folders?.find((f) => f.accountId === checkedMsgs[0]!.accountId) : undefined}
@@ -200,7 +203,13 @@ export function MessageList(p: Props) {
                   {m.answered && <Reply size={13} className="ind" />}
                   {m.hasAttachments && <Paperclip size={13} className="ind" />}
                   {m.flagged && <Star size={13} className="flag" fill="currentColor" />}
-                  <span className="row-date">{formatListDate(m.date)}</span>
+                  {m.snoozedUntil ? (
+                    <span className="row-date snoozed" title={`Snoozed until ${new Date(m.snoozedUntil).toLocaleString()}`}>
+                      <AlarmClock size={12} /> {formatSnoozeTime(m.snoozedUntil)}
+                    </span>
+                  ) : (
+                    <span className="row-date">{formatListDate(m.date)}</span>
+                  )}
                 </div>
                 <div className="row-subject">
                   <span>{m.subject || '(no subject)'}</span>

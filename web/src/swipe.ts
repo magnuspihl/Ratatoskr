@@ -72,7 +72,7 @@ export function swipeToAction(action: SwipeAction, m: Pick<MessageSummary, 'seen
 
 /** Does this action remove the row from the list (so it should animate out)? */
 export function removesFromList(action: MessageAction): boolean {
-  return action.type === 'delete' || action.type === 'archive' || action.type === 'move';
+  return action.type === 'delete' || action.type === 'archive' || action.type === 'move' || action.type === 'snooze' || action.type === 'unsnooze';
 }
 
 export interface UndoStep {
