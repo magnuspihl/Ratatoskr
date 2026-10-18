@@ -12,7 +12,8 @@ import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { SquirrelRun, type Run } from './components/SquirrelRun';
 import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts, type SnoozeEndedEvent } from './hooks';
-import { blankComposer, composerFor } from './replies';
+import { PENDING_MAILTO_KEY, parseMailto } from './mailto';
+import { blankComposer, composerFor, composerForMailto } from './replies';
 import { useRouter, type Location } from './router';
 import { disablePush, notificationTarget, registerServiceWorker, setAppBadge, syncPush } from './push';
 import { HOME, listRoute, openMessageFolder, parseLocation, viewKey, type Route } from './routing';
@@ -35,6 +36,8 @@ export function App() {
 
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [composer, setComposer] = useState<ComposerInit | null>(null);
+  /** Bumped for every new composer, so it starts fresh even if the previous one looked alike. */
+  const [composeId, setComposeId] = useState(0);
   const [lastOpenKey, setLastOpenKey] = useState<string | null>(null);
   const [snoozeSignal, setSnoozeSignal] = useState(0);
   const composerDirty = useRef(false);
@@ -266,6 +269,7 @@ export function App() {
   const startCompose = useCallback(
     (init: ComposerInit) => {
       setComposer(init);
+      setComposeId((n) => n + 1);
       composerDirty.current = false;
       composeNavs.current = 0;
       openOverlay('compose');
@@ -276,6 +280,25 @@ export function App() {
     const account = (effectiveSel.accountId && accountMap.get(effectiveSel.accountId)) || accounts[0];
     if (account) startCompose(blankComposer(account));
   };
+  /** Compose from a mailto: link, from the current account (or the first one). */
+  const composeMailto = useCallback(
+    (mailto: string) => {
+      const fields = parseMailto(mailto);
+      const account = (effectiveSel.accountId && accountMap.get(effectiveSel.accountId)) || accounts[0];
+      if (!fields || !account) return;
+      if (composerRef.current && composerDirty.current && !window.confirm('Discard the message you are writing?')) return;
+      startCompose(composerForMailto(fields, account));
+    },
+    [effectiveSel.accountId, accountMap, accounts, startCompose],
+  );
+  // Opened for a mailto: link (see main.tsx): compose once signed in and there is an account.
+  useEffect(() => {
+    if (!loggedIn || !accountsQ.isSuccess || accounts.length === 0) return;
+    const pending = sessionStorage.getItem(PENDING_MAILTO_KEY);
+    if (!pending) return;
+    sessionStorage.removeItem(PENDING_MAILTO_KEY);
+    composeMailto(pending);
+  }, [loggedIn, accountsQ.isSuccess, accounts.length, composeMailto]);
   const reply = useCallback(
     (kind: ReplyKind, d: MessageDetail) => {
       const account = accountMap.get(d.accountId);
@@ -475,12 +498,13 @@ export function App() {
         onAction={(refs, a) => void act(refs, a)}
         snoozeSignal={snoozeSignal}
         onReply={reply}
+        onMailto={composeMailto}
         onBack={() => back(listRoute(route))}
         onGone={open ? onGone : () => {}}
       />
       {composer && (
         <Composer
-          key={JSON.stringify(composer.answering ?? composer.replaceDraft ?? composer.subject)}
+          key={composeId}
           init={composer}
           accounts={accounts}
           onClose={closeComposer}

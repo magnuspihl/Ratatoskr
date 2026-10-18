@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import type { DomainName, NotificationContent, Preferences, SwipeAction, TransitionSpeed } from '../../../shared/types';
 import { api } from '../api';
+import { handlerTemplate } from '../mailto';
 import { currentEnvironment, currentSubscription, disablePush, enablePush, pushAvailability, type PushAvailability } from '../push';
 
 const TRANSITION_OPTIONS: [TransitionSpeed, string][] = [
@@ -103,6 +104,7 @@ export function SettingsDialog({ prefs, hasPassword, onClose }: { prefs: Prefere
             <div className="hint">On phones, the squirrel runs across the screen when you open the menu or a message.</div>
           </div>
           <Notifications prefs={v} save={save} />
+          <EmailLinks />
           <ImageDomains />
           {hasPassword && <ChangePassword />}
           {error && <div className="error-text">{error}</div>}
@@ -220,6 +222,48 @@ function ImageDomains() {
       </form>
       <div className="hint">Also covers subdomains. Not applied to messages that fail the sender check (DMARC).</div>
       {(error || domains.error) && <div className="error-text">{error ?? (domains.error as Error).message}</div>}
+    </div>
+  );
+}
+
+/** Ask the browser to open mailto: links (on any website) in Ratatoskr. */
+function EmailLinks() {
+  const [asked, setAsked] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const supported = window.isSecureContext && typeof navigator.registerProtocolHandler === 'function';
+
+  const register = () => {
+    setError(null);
+    try {
+      navigator.registerProtocolHandler('mailto', handlerTemplate(window.location.origin));
+      setAsked(true);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  };
+
+  return (
+    <div>
+      <label className="label">Email links</label>
+      {supported ? (
+        <>
+          <button className="btn" onClick={register}>
+            Open email links with Ratatoskr
+          </button>
+          <div className="hint">
+            {asked
+              ? 'Confirm in your browser’s prompt (some browsers show it as an icon in the address bar). You can undo this in the browser’s settings.'
+              : 'Makes mailto: links on any website open a new message here. Links in your mail always do.'}
+          </div>
+        </>
+      ) : (
+        <div className="hint">
+          {window.isSecureContext
+            ? 'This browser can’t send mailto: links on other websites to Ratatoskr. Links in your mail still open a new message here.'
+            : 'Opening mailto: links from other websites needs the app to be served over HTTPS.'}
+        </div>
+      )}
+      {error && <div className="error-text">{error}</div>}
     </div>
   );
 }

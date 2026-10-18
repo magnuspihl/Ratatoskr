@@ -1,6 +1,7 @@
 import type { AccountView, Address, MessageDetail } from '../../shared/types';
 import type { ComposerInit } from './components/Composer';
 import type { ReplyKind } from './components/Reader';
+import type { MailtoFields } from './mailto';
 import { escapeHtml, formatAddress, formatFullDate, prefixSubject, textToHtml, toRef } from './util';
 
 const list = (addrs: Address[]) => addrs.map(formatAddress).join(', ');
@@ -34,6 +35,18 @@ export function blankComposer(account: AccountView): ComposerInit {
     forwardAttachments: [],
     replaceDraft: null,
     answering: null,
+  };
+}
+
+/** A new message filled in from a mailto: link. The body is plain text. */
+export function composerForMailto(fields: MailtoFields, account: AccountView): ComposerInit {
+  return {
+    ...blankComposer(account),
+    to: fields.to,
+    cc: fields.cc,
+    bcc: fields.bcc,
+    subject: fields.subject,
+    html: fields.body ? `<p>${textToHtml(fields.body)}</p>` : '<p><br></p>',
   };
 }
 
