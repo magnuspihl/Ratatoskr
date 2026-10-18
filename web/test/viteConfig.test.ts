@@ -1,7 +1,11 @@
 import { EventEmitter } from 'node:events';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Plugin, UserConfig } from 'vite';
 import viteConfig, { devHostGuard } from '../vite.config';
+
+// loadEnv always reads a plain .env, whatever the mode, so a developer's own .env would leak into these
+// tests. Only the process.env set up below should count.
+vi.mock('vite', async (importOriginal) => ({ ...(await importOriginal<typeof import('vite')>()), loadEnv: () => ({}) }));
 
 const SUFFIX = '--myworkspace--me.dev.example.com';
 const KEYS = ['RATATOSKR_BASE_URL', 'RATATOSKR_DEV_ALLOWED_HOST_SUFFIX'] as const;

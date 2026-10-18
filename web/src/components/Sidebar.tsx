@@ -7,7 +7,6 @@ import {
   Folder,
   Inbox,
   LogOut,
-  Mail,
   PenSquare,
   Send,
   Settings,
@@ -69,9 +68,7 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
   return (
     <aside className={`pane sidebar ${rail ? 'rail' : ''}`}>
       <div className="brand">
-        <div className="brand-mark">
-          <Mail size={15} />
-        </div>
+        <img className="brand-mark" src="/favicon.svg" alt="" />
         <span className="name" style={{ flex: 1 }}>Ratatoskr</span>
         <button className="icon-btn mobile-only" title="Close" onClick={onCloseNav}>
           <X size={18} />
