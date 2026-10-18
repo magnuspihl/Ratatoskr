@@ -65,13 +65,14 @@ const actionSchema = z.discriminatedUnion('type', [
 ]);
 
 const swipe = z.enum(['none', 'delete', 'archive', 'toggleRead', 'toggleFlag']);
-const prefsSchema = z.object({
+export const prefsSchema = z.object({
   theme: z.enum(['system', 'light', 'dark']),
   pageSize: z.number().int().min(10).max(200),
   markReadOnOpen: z.boolean(),
   swipeLeft: swipe,
   swipeRight: swipe,
   notificationContent: z.enum(['full', 'minimal']).default('full'),
+  squirrelTransitions: z.boolean().default(true),
 });
 
 const pushSubscriptionSchema = z.object({

@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../shared/types';
 import { inboxUnread } from '../../shared/unread';
 import { api, ApiError, type MailboxSel } from './api';
@@ -10,6 +10,7 @@ import { MessageList } from './components/MessageList';
 import { quotableDetail, Reader, type ReplyKind } from './components/Reader';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
+import { SquirrelRun, type Run } from './components/SquirrelRun';
 import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts, type SnoozeEndedEvent } from './hooks';
 import { blankComposer, composerFor } from './replies';
 import { useRouter, type Location } from './router';
@@ -18,9 +19,8 @@ import { HOME, listRoute, openMessageFolder, parseLocation, viewKey, type Route 
 import { updateSticky, withSticky } from './sticky';
 import { removesFromList, swipeToAction, type Direction, type UndoStep } from './swipe';
 import { formatSnoozeTime } from './snooze';
+import { planRun, runFor, runsEnabled, type PaneView } from './squirrel';
 import { refKey, toRef } from './util';
-
-type MobileView = 'nav' | 'list' | 'reader';
 
 export function App() {
   const qc = useQueryClient();
@@ -69,11 +69,31 @@ export function App() {
     [route],
   );
   const dialog = overlay === 'settings' || overlay === 'accounts' ? overlay : null;
-  const view: MobileView = overlay === 'nav' ? 'nav' : open ? 'reader' : 'list';
+  const view: PaneView = overlay === 'nav' ? 'nav' : open ? 'reader' : 'list';
 
   useEffect(() => {
     if (open) setLastOpenKey(refKey(open));
   }, [open]);
+
+  // Phone view changes: the squirrel runs across and drags the new view in. Set before paint so
+  // the new pane never flashes in unclipped.
+  const appRef = useRef<HTMLDivElement>(null);
+  const shownView = useRef(view);
+  const runId = useRef(0);
+  const [run, setRun] = useState<(Run & { from: PaneView }) | null>(null);
+  const squirrelPref = me.data?.preferences.squirrelTransitions;
+  useLayoutEffect(() => {
+    const from = shownView.current;
+    shownView.current = view;
+    const kind = runFor(from, view);
+    if (!kind) return;
+    const enabled = runsEnabled(squirrelPref, matchMedia('(max-width: 860px)').matches, matchMedia('(prefers-reduced-motion: reduce)').matches);
+    setRun(enabled ? { id: ++runId.current, plan: planRun(kind, window.innerWidth, window.innerHeight), from, to: view } : null);
+  }, [view, squirrelPref]);
+  // While running back to the folder, the message stays up underneath rather than the empty reader.
+  const lastOpen = useRef(open);
+  if (open) lastOpen.current = open;
+  const readerRef = open ?? (run?.from === 'reader' ? lastOpen.current : null);
 
   /** Navigate, keeping a non-modal composer open on top of the new entry. */
   const go = useCallback(
@@ -367,7 +387,7 @@ export function App() {
   };
 
   return (
-    <div className="app" data-view={view}>
+    <div className="app" data-view={view} ref={appRef} data-run={run?.plan.kind} data-leaving={run?.from}>
       <Sidebar
         accounts={accounts}
         folders={folders.data}
@@ -442,12 +462,12 @@ export function App() {
         onSwipe={(m, d) => void onSwipe(m, d)}
       />
       <Reader
-        openRef={open}
-        account={open ? accountMap.get(open.accountId) : undefined}
-        folders={open ? folders.data?.find((f) => f.accountId === open.accountId) : undefined}
+        openRef={readerRef}
+        account={readerRef ? accountMap.get(readerRef.accountId) : undefined}
+        folders={readerRef ? folders.data?.find((f) => f.accountId === readerRef.accountId) : undefined}
         isDrafts={
-          !!open &&
-          folders.data?.find((f) => f.accountId === open.accountId)?.folders.find((f) => f.path === open.folder)?.specialUse === 'drafts'
+          !!readerRef &&
+          folders.data?.find((f) => f.accountId === readerRef.accountId)?.folders.find((f) => f.path === readerRef.folder)?.specialUse === 'drafts'
         }
         theme={theme}
         markReadOnOpen={me.data!.preferences.markReadOnOpen}
@@ -455,7 +475,7 @@ export function App() {
         snoozeSignal={snoozeSignal}
         onReply={reply}
         onBack={() => back(listRoute(route))}
-        onGone={onGone}
+        onGone={open ? onGone : () => {}}
       />
       {composer && (
         <Composer
@@ -473,6 +493,7 @@ export function App() {
       )}
       {dialog === 'accounts' && <AccountsDialog accounts={accounts} defaults={me.data!.accountDefaults} startWithNew={accounts.length === 0} onClose={() => closeOverlay('accounts')} />}
       {dialog === 'settings' && <SettingsDialog prefs={me.data!.preferences} hasPassword={me.data!.hasPassword} onClose={() => closeOverlay('settings')} />}
+      {run && <SquirrelRun key={run.id} run={run} appRef={appRef} onDone={() => setRun(null)} />}
       <div className="toast-stack" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.error ? 'error' : ''}`}>
