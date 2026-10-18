@@ -2,13 +2,28 @@ import crypto from 'node:crypto';
 import type { PushSubscriptionInput } from '../../../shared/types.js';
 import type { Store } from '../db.js';
 import { buildNotification, type NewMail, type NotificationPayload } from './notify.js';
-import { isAllowedPushEndpoint, MAX_PAYLOAD_BYTES, type PushTransport } from './webpush.js';
+import { assertPublicHost } from '../net/ssrf.js';
+import { checkPushEndpoint, MAX_PAYLOAD_BYTES, PushEndpointError, type PushTransport } from './webpush.js';
 
 export class PushSubscriptionError extends Error {}
 
-/** Checks a subscription from the browser before it is stored (and later POSTed to). */
-export function validateSubscription(sub: PushSubscriptionInput) {
-  if (!isAllowedPushEndpoint(sub.endpoint)) throw new PushSubscriptionError('Unsupported push service');
+/**
+ * Checks a subscription from the browser before it is stored (and later POSTed to). `resolve`
+ * also refuses hosts that resolve to internal addresses, for a clear error up front; sending
+ * enforces that again on every connection.
+ */
+export async function validateSubscription(sub: PushSubscriptionInput, resolve: (host: string) => Promise<void> = assertPublicHost) {
+  let url: URL;
+  try {
+    url = checkPushEndpoint(sub.endpoint);
+  } catch (err) {
+    throw new PushSubscriptionError((err as PushEndpointError).message);
+  }
+  try {
+    await resolve(url.hostname);
+  } catch {
+    throw new PushSubscriptionError(`Unsupported push service (${url.hostname}): it does not resolve to a public address`);
+  }
   const pub = Buffer.from(sub.keys.p256dh, 'base64url');
   const auth = Buffer.from(sub.keys.auth, 'base64url');
   if (auth.length !== 16) throw new PushSubscriptionError('Invalid push subscription keys');

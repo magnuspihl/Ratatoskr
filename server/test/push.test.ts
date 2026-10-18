@@ -91,20 +91,36 @@ describe('notification text', () => {
 });
 
 describe('push subscription validation', () => {
-  it('accepts a real browser subscription', () => {
-    expect(() => validateSubscription(sub('ok'))).not.toThrow();
+  const publicHost = async () => {};
+  const internalHost = async () => {
+    throw new Error('blocked');
+  };
+
+  it('accepts a real browser subscription', async () => {
+    await expect(validateSubscription(sub('ok'), publicHost)).resolves.toBeUndefined();
   });
 
-  it('refuses endpoints outside the known push services (the server would POST to them)', () => {
-    expect(() => validateSubscription({ ...sub('x'), endpoint: 'https://169.254.169.254/latest/meta-data' })).toThrow(PushSubscriptionError);
+  it('accepts push services other than the big four, such as other Chromium browsers use', async () => {
+    await expect(validateSubscription({ ...sub('x'), endpoint: 'https://push.vivaldi-like.example.net/abc' }, publicHost)).resolves.toBeUndefined();
   });
 
-  it('refuses keys that are not a P-256 point or a 16-byte auth secret', () => {
+  it('refuses push hosts that resolve to internal addresses, naming the host', async () => {
+    await expect(validateSubscription({ ...sub('x'), endpoint: 'https://push.corp.example.net/x' }, internalHost)).rejects.toThrow(
+      /push\.corp\.example\.net.*public address/,
+    );
+  });
+
+  it('refuses endpoints that are not plain HTTPS URLs on a host name', async () => {
+    await expect(validateSubscription({ ...sub('x'), endpoint: 'https://169.254.169.254/latest/meta-data' }, publicHost)).rejects.toThrow(PushSubscriptionError);
+    await expect(validateSubscription({ ...sub('x'), endpoint: 'http://fcm.googleapis.com/x' }, publicHost)).rejects.toThrow(PushSubscriptionError);
+  });
+
+  it('refuses keys that are not a P-256 point or a 16-byte auth secret', async () => {
     const good = sub('k');
     const offCurve = Buffer.alloc(65, 1);
     offCurve[0] = 4;
-    expect(() => validateSubscription({ ...good, keys: { ...good.keys, p256dh: offCurve.toString('base64url') } })).toThrow(PushSubscriptionError);
-    expect(() => validateSubscription({ ...good, keys: { ...good.keys, auth: 'c2hvcnQ' } })).toThrow(PushSubscriptionError);
+    await expect(validateSubscription({ ...good, keys: { ...good.keys, p256dh: offCurve.toString('base64url') } }, publicHost)).rejects.toThrow(PushSubscriptionError);
+    await expect(validateSubscription({ ...good, keys: { ...good.keys, auth: 'c2hvcnQ' } }, publicHost)).rejects.toThrow(PushSubscriptionError);
   });
 });
 

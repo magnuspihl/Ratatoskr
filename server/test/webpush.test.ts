@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { Keyring } from '../src/crypto.js';
-import { encryptPayload, isAllowedPushEndpoint, vapidAuthorization, vapidKeysFromSeed } from '../src/push/webpush.js';
+import { checkPushEndpoint, createPushTransport, encryptPayload, isAllowedPushEndpoint, PushEndpointError, vapidAuthorization, vapidKeysFromSeed } from '../src/push/webpush.js';
 
 const b = (s: string) => Buffer.from(s, 'base64url');
 
@@ -93,27 +93,48 @@ describe('VAPID', () => {
   });
 });
 
-describe('push endpoint allowlist', () => {
+describe('which push endpoints are accepted', () => {
   it.each([
     'https://fcm.googleapis.com/fcm/send/abc',
     'https://web.push.apple.com/QGx1',
     'https://updates.push.services.mozilla.com/wpush/v2/gAAA',
     'https://wns2-par02p.notify.windows.com/w/?token=x',
-  ])('accepts the browser push service %s', (url) => {
+    'https://push.some-other-browser.com/v1/abc',
+    'https://fcm.googleapis.com:443/fcm/send/abc',
+  ])('accepts the HTTPS push service %s, whichever browser it belongs to', (url) => {
     expect(isAllowedPushEndpoint(url)).toBe(true);
   });
 
   it.each([
     'http://fcm.googleapis.com/fcm/send/abc',
     'https://127.0.0.1/push',
+    'https://10.0.0.5/push',
+    'https://[::1]/push',
     'https://localhost/push',
-    'https://fcm.googleapis.com.evil.test/x',
-    'https://evilfcm.googleapis.com.example/x',
-    'https://notpush.apple.com.attacker.example/x',
+    'https://router.local/push',
+    'https://metadata.internal/push',
     'https://user:pw@fcm.googleapis.com/x',
     'https://fcm.googleapis.com:8443/x',
     'not a url',
   ])('refuses %s', (url) => {
     expect(isAllowedPushEndpoint(url)).toBe(false);
+  });
+
+  it('explains that a browser without a push service cannot get notifications', () => {
+    expect(() => checkPushEndpoint('https://permanently-removed.invalid/fcm/send/abc')).toThrow(/no working push service \(permanently-removed\.invalid\)/);
+  });
+
+  it('names the host when refusing an endpoint', () => {
+    expect(() => checkPushEndpoint('http://push.example.org/x')).toThrow(PushEndpointError);
+    expect(() => checkPushEndpoint('http://push.example.org/x')).toThrow(/push\.example\.org/);
+  });
+});
+
+describe('sending to a push service', () => {
+  it('never contacts an internal address, even if such a subscription got stored', async () => {
+    const keys = vapidKeysFromSeed(crypto.randomBytes(32));
+    const send = createPushTransport(keys, 'mailto:admin@example.com');
+    const subscription = { endpoint: 'https://10.0.0.1/push', p256dh: RFC.uaPublic, auth: RFC.auth };
+    expect(await send({ subscription, payload: { title: 'x' }, ttl: 60 })).toBe('gone');
   });
 });

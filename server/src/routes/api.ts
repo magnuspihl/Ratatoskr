@@ -117,12 +117,14 @@ export interface ApiDeps {
   push: PushService;
   /** VAPID public key, the browser's applicationServerKey. */
   vapidPublicKey: string;
+  /** Replaces the DNS check of push service hosts (tests only). */
+  pushHostCheck?: (host: string) => Promise<void>;
   /** Replaces the real remote image fetcher (tests only). */
   fetchImage?: (url: string) => Promise<RemoteImage>;
 }
 
 export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
-  const { config, store, sessions, pool, mail, compose, push, vapidPublicKey, fetchImage } = deps;
+  const { config, store, sessions, pool, mail, compose, push, vapidPublicKey, pushHostCheck, fetchImage } = deps;
 
   app.decorateRequest('user', null);
 
@@ -172,7 +174,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
   app.post('/api/push/subscriptions', async (req, reply) => {
     try {
       const sub = pushSubscriptionSchema.parse(req.body);
-      validateSubscription(sub);
+      await validateSubscription(sub, pushHostCheck);
       store.addPushSubscription(uid(req), sub);
       pool.setBackground(uid(req), true, true);
       return { ok: true };
