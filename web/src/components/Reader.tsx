@@ -4,11 +4,9 @@ import {
   Archive,
   ArrowLeft,
   Download,
-  FileText,
   Flag,
   FolderInput,
   Forward,
-  Image as ImageIcon,
   ImageOff,
   Mail,
   MailOpen,
@@ -73,6 +71,8 @@ export async function quotableDetail(qc: QueryClient, d: MessageDetail): Promise
 interface Props {
   openRef: MessageRef | null;
   account: AccountView | undefined;
+  /** The user has more than one account, so which one received the message is worth showing. */
+  multipleAccounts: boolean;
   folders: AccountFolders | undefined;
   isDrafts: boolean;
   theme: ResolvedTheme;
@@ -86,17 +86,19 @@ interface Props {
   onGone: (stale: boolean) => void;
 }
 
-export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnOpen, onAction, snoozeSignal, onReply, onBack, onGone }: Props) {
+export function Reader({ openRef, account, multipleAccounts, folders, isDrafts, theme, markReadOnOpen, onAction, snoozeSignal, onReply, onBack, onGone }: Props) {
   const key = openRef ? refKey(openRef) : '';
   const [remote, setRemote] = useState(false);
   const [modeOverride, setModeOverride] = useState<'dark' | 'paper' | null>(null);
   const [showText, setShowText] = useState(false);
+  const [headOpen, setHeadOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   useEffect(() => {
     setRemote(false);
     setModeOverride(null);
     setShowText(false);
+    setHeadOpen(false);
     setLocalError(null);
   }, [key]);
 
@@ -161,6 +163,31 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
       setBusy(false);
     }
   };
+  // How to show an HTML message: dark/paper (dark theme only) and HTML/plain text, kept on one line.
+  const viewToggles = d?.html && ((theme === 'dark' && !showText) || d.text) && (
+    <div className="view-toggles">
+      {theme === 'dark' && !showText && (
+        <div className="segmented" title="How to display this message in dark mode">
+          <button className={mode === 'dark' ? 'on' : ''} onClick={() => setModeOverride('dark')}>
+            Dark
+          </button>
+          <button className={mode === 'paper' ? 'on' : ''} onClick={() => setModeOverride('paper')}>
+            Paper
+          </button>
+        </div>
+      )}
+      {d.text && (
+        <div className="segmented" title="Show the HTML or plain-text version">
+          <button className={showText ? '' : 'on'} onClick={() => setShowText(false)}>
+            HTML
+          </button>
+          <button className={showText ? 'on' : ''} onClick={() => setShowText(true)}>
+            Text
+          </button>
+        </div>
+      )}
+    </div>
+  );
   const seen = d?.seen ?? true;
   const flagged = d?.flagged ?? false;
 
@@ -215,18 +242,23 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
         {d && (
           <>
             <h2 className="msg-subject">{d.subject || '(no subject)'}</h2>
-            <div className="msg-head">
+            <div className={`msg-head ${headOpen ? 'open' : ''}`}>
               <div className="avatar" style={{ background: avatarColor(d.from[0]?.address ?? '') }}>
                 {initials(d.from[0])}
               </div>
               <div className="msg-meta">
+                {/* On phones the addresses and recipients fold away; tapping the sender shows them. */}
                 <div className="msg-from">
-                  {displayName(d.from[0]) || '(unknown sender)'} {d.from[0]?.name && <span className="addr">&lt;{d.from[0].address}&gt;</span>}
+                  <button className="msg-from-toggle" aria-expanded={headOpen} title="Show details" onClick={() => setHeadOpen((o) => !o)}>
+                    {displayName(d.from[0]) || '(unknown sender)'}
+                  </button>{' '}
+                  {d.from[0]?.name && <span className="addr">&lt;{d.from[0].address}&gt;</span>}
                 </div>
-                <div className="msg-to" title={[...d.to, ...d.cc].map((a) => a.address).join(', ')}>
+                <div className={`msg-to ${multipleAccounts && account ? 'has-account' : ''}`} title={[...d.to, ...d.cc].map((a) => a.address).join(', ')}>
                   to {d.to.map(displayName).join(', ') || '(undisclosed)'}
-                  {d.cc.length > 0 && <> · cc {d.cc.map(displayName).join(', ')}</>}
-                  {account && <span className="muted"> · {account.name}</span>}
+                  {multipleAccounts && account && <span className="acct-dot" style={{ background: account.color }} title={account.name} />}
+                  {d.cc.length > 0 && <span className="cc"> · cc {d.cc.map(displayName).join(', ')}</span>}
+                  {multipleAccounts && account && <span className="muted acct-name"> · {account.name}</span>}
                 </div>
               </div>
               <div className="msg-date">{formatFullDate(d.date)}</div>
@@ -244,71 +276,31 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
               </div>
             )}
 
-            {d.html && (d.remoteContentBlocked > 0 || d.imagesAllowedBy || theme === 'dark' || d.text) && (
+            {d.html && d.remoteContentBlocked > 0 && !d.remoteContentLoaded ? (
               <div className="notice">
-                {d.remoteContentBlocked > 0 && !d.remoteContentLoaded ? (
-                  <>
-                    <ImageOff size={16} />
-                    <span className="grow">
-                      {d.allowlistSkipped === 'dmarc-fail' && d.senderDomain
-                        ? `Images not loaded automatically: this message failed the sender check (DMARC) for ${d.senderDomain.display}.`
-                        : `Remote content blocked (${d.remoteContentBlocked}) to protect your privacy.`}
-                    </span>
-                    <button className="btn" onClick={() => setRemote(true)}>
-                      Load images
-                    </button>
-                    {d.senderDomain && !d.allowlistSkipped && (
-                      <button
-                        className="btn ghost"
-                        disabled={busy}
-                        title="Always load remote images in mail from this domain and its subdomains"
-                        onClick={() => void changeAllowlist(() => api.addImageDomain(d.senderDomain!.domain))}
-                      >
-                        Always load from {d.senderDomain.display}
-                      </button>
-                    )}
-                  </>
-                ) : d.imagesAllowedBy && !remote ? (
-                  <>
-                    <ImageIcon size={16} />
-                    <span className="grow">
-                      Images loaded automatically from {d.imagesAllowedBy.display}
-                      {d.remoteContentBlocked > 0 && ` (${d.remoteContentBlocked} couldn't be loaded)`} ·{' '}
-                      <button
-                        className="link-btn"
-                        disabled={busy}
-                        title={`Stop loading images automatically from ${d.imagesAllowedBy.display}`}
-                        onClick={() => void changeAllowlist(() => api.removeImageDomain(d.imagesAllowedBy!.domain))}
-                      >
-                        Stop
-                      </button>
-                    </span>
-                  </>
-                ) : (
-                  <span className="grow">
-                    {remote
-                      ? d.remoteContentBlocked > 0
-                        ? `${d.remoteContentBlocked} remote image${d.remoteContentBlocked === 1 ? '' : 's'} couldn't be loaded.`
-                        : 'Remote images were downloaded by the server, without revealing your address.'
-                      : ''}
-                  </span>
-                )}
-                {theme === 'dark' && !showText && (
-                  <div className="segmented" title="How to display this message in dark mode">
-                    <button className={mode === 'dark' ? 'on' : ''} onClick={() => setModeOverride('dark')}>
-                      Dark
-                    </button>
-                    <button className={mode === 'paper' ? 'on' : ''} onClick={() => setModeOverride('paper')}>
-                      Paper
-                    </button>
-                  </div>
-                )}
-                {d.text && (
-                  <button className="btn ghost" title="Toggle plain text" onClick={() => setShowText((s) => !s)}>
-                    <FileText size={15} /> {showText ? 'HTML' : 'Text'}
+                <ImageOff size={16} />
+                <span className="grow">
+                  {d.allowlistSkipped === 'dmarc-fail' && d.senderDomain
+                    ? `Images not loaded automatically: this message failed the sender check (DMARC) for ${d.senderDomain.display}.`
+                    : `Remote content blocked (${d.remoteContentBlocked}) to protect your privacy.`}
+                </span>
+                <button className="btn" onClick={() => setRemote(true)}>
+                  Load images
+                </button>
+                {d.senderDomain && !d.allowlistSkipped && (
+                  <button
+                    className="btn ghost"
+                    disabled={busy}
+                    title="Always load remote images in mail from this domain and its subdomains"
+                    onClick={() => void changeAllowlist(() => api.addImageDomain(d.senderDomain!.domain))}
+                  >
+                    Always load from {d.senderDomain.display}
                   </button>
                 )}
+                {viewToggles}
               </div>
+            ) : (
+              viewToggles
             )}
 
             {d.attachments.length > 0 && (
