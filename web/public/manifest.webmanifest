@@ -6,6 +6,7 @@
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "protocol_handlers": [{ "protocol": "mailto", "url": "/?mailto=%s" }],
   "background_color": "#fdeee6",
   "theme_color": "#f6f6f4",
   "icons": [

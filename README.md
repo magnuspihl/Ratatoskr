@@ -43,6 +43,11 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
   account's Drafts folder), a copy in Sent, and recipient autocomplete from recently used
   addresses. Special-use folders (`\Sent`, `\Drafts`, `\Trash`, `\Archive`, `\Junk`) are detected
   with name fallbacks.
+- `mailto:` links open a new message in Ratatoskr: in plain-text mail directly, in HTML mail in a
+  new tab (clicks inside the sandboxed message frame can't be caught). Settings → "Open email links
+  with Ratatoskr" makes the browser send `mailto:` links on any website here too; the installed app
+  (PWA) registers for them on its own where the browser supports it. Only recipients, subject and
+  a plain-text body are taken from a link, and nothing is sent until you press Send.
 - Server-side IMAP search in the current folder, or across all inboxes in the unified view.
 - Dark mode that follows the system, with a manual override. Simple HTML and plain-text mail get
   dark styling. Heavily designed mail (newsletters) is shown on a light "paper" card instead of
@@ -267,7 +272,8 @@ Every message is assumed to be hostile.
   sanitizer. Removed: scripts, event handlers, forms, frames, objects, SVG/MathML,
   meta/base/link, comments, `javascript:`/`data:` links, CSS expressions, `@import`,
   behaviours, and anything hidden behind CSS escapes. Links are limited to
-  `http`/`https`/`mailto`/`tel` and open in a new tab with `noopener noreferrer`.
+  `http`/`https`/`mailto`/`tel` and open in a new tab with `noopener noreferrer`. `mailto:` links
+  are pointed at the app's own composer (`/?mailto=…`) just before display.
 - The result is rendered in an `<iframe sandbox>` **without** `allow-scripts` and
   `allow-same-origin`. That gives it an opaque origin, so it can't reach the app, its cookies or
   storage. A strict Content-Security-Policy inside the frame (`default-src 'none'; img-src data:`)

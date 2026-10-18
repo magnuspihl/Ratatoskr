@@ -26,27 +26,37 @@ import { MessageFrame } from './MessageFrame';
 import { MoveMenu } from './MoveMenu';
 import { SnoozeMenu } from './SnoozeMenu';
 import { formatSnoozeTime } from '../snooze';
+import { linkify } from '../mailto';
 
-const URL_RE = /\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
-
-/** Plain-text body: React escapes everything; only http(s) URLs become links. */
-function TextBody({ text }: { text: string }) {
+/**
+ * Plain-text body: React escapes everything; only http(s) URLs, mailto: links and email addresses
+ * become links. Email links open the composer here instead of another mail program.
+ */
+function TextBody({ text, onMailto }: { text: string; onMailto: (mailto: string) => void }) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   return (
     <div className="msg-text">
       {lines.map((line, i) => {
-        const parts: ReactNode[] = [];
-        let last = 0;
-        for (const m of line.matchAll(URL_RE)) {
-          parts.push(line.slice(last, m.index));
-          parts.push(
-            <a key={m.index} href={m[0]} target="_blank" rel="noopener noreferrer nofollow">
-              {m[0]}
-            </a>,
-          );
-          last = m.index + m[0].length;
-        }
-        parts.push(line.slice(last));
+        const parts: ReactNode[] = linkify(line).map((p, j) =>
+          typeof p === 'string' ? (
+            p
+          ) : p.mailto ? (
+            <a
+              key={j}
+              href={p.href}
+              onClick={(e) => {
+                e.preventDefault();
+                onMailto(p.href);
+              }}
+            >
+              {p.text}
+            </a>
+          ) : (
+            <a key={j} href={p.href} target="_blank" rel="noopener noreferrer nofollow">
+              {p.text}
+            </a>
+          ),
+        );
         return (
           <span key={i} className={/^\s*>/.test(line) ? 'quote' : undefined}>
             {parts}
@@ -90,6 +100,8 @@ interface Props {
   /** Opens the snooze menu whenever it changes (keyboard shortcut). */
   snoozeSignal: number;
   onReply: (kind: ReplyKind, detail: MessageDetail) => void;
+  /** A mailto: link in a plain-text body was clicked. */
+  onMailto: (mailto: string) => void;
   onBack: () => void;
   /** The message is gone (404) or its folder's UIDVALIDITY changed (stale). */
   onGone: (stale: boolean) => void;
@@ -97,7 +109,7 @@ interface Props {
 
 const retry = (n: number, err: Error) => !(err instanceof ApiError && err.status < 500) && n < 1;
 
-export function Reader({ openRef, conversation, account, multipleAccounts, folders, isDrafts, theme, markReadOnOpen, onAction, snoozeSignal, onReply, onBack, onGone }: Props) {
+export function Reader({ openRef, conversation, account, multipleAccounts, folders, isDrafts, theme, markReadOnOpen, onAction, snoozeSignal, onReply, onMailto, onBack, onGone }: Props) {
   const key = openRef ? refKey(openRef) : '';
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -250,6 +262,7 @@ export function Reader({ openRef, conversation, account, multipleAccounts, folde
               busy={busy}
               onAllowDomain={(domain) => void changeAllowlist(() => api.addImageDomain(domain))}
               onAction={onAction}
+              onMailto={onMailto}
               onGone={k === key ? onGone : undefined}
             />
           );
@@ -271,6 +284,7 @@ function MessageCard({
   busy,
   onAllowDomain,
   onAction,
+  onMailto,
   onGone,
 }: {
   msgRef: MessageRef;
@@ -284,6 +298,7 @@ function MessageCard({
   busy: boolean;
   onAllowDomain: (domain: string) => void;
   onAction: (refs: MessageRef[], action: MessageAction) => void;
+  onMailto: (mailto: string) => void;
   /** Only for the open message: it is gone or its folder changed. */
   onGone?: (stale: boolean) => void;
 }) {
@@ -448,7 +463,7 @@ function MessageCard({
               <MessageFrame html={d.html} css={d.css} mode={mode} themeKey={theme} />
             </div>
           ) : (
-            <TextBody text={d.text ?? ''} />
+            <TextBody text={d.text ?? ''} onMailto={onMailto} />
           )}
         </>
       )}

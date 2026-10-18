@@ -63,6 +63,7 @@ function render(d: MessageDetail, opts: { multipleAccounts?: boolean; theme?: Re
         onAction: noop,
         snoozeSignal: 0,
         onReply: noop,
+        onMailto: noop,
         onBack: noop,
         onGone: noop,
       }),
@@ -175,6 +176,7 @@ describe('conversation view', () => {
           onAction: noop,
           snoozeSignal: 0,
           onReply: noop,
+          onMailto: noop,
           onBack: noop,
           onGone: noop,
         }),
@@ -198,5 +200,18 @@ describe('conversation view', () => {
     const conversation = groupConversations([original], [myReply])[0]!;
     expect(replyTarget(conversation, ref)).toEqual(myReplyRef);
     expect(replyTarget(undefined, ref)).toEqual(ref);
+  });
+});
+
+describe('message bodies', () => {
+  it('links email addresses in plain-text mail as mailto: links that stay in the app', () => {
+    const html = render(detail({ html: null, text: 'Write to ada@example.com' }));
+    expect(html).toContain('<a href="mailto:ada@example.com">ada@example.com</a>');
+  });
+
+  it('points mailto: links in HTML mail at the app’s composer', () => {
+    const html = render(detail({ html: '<a href="mailto:ada@example.com" target="_blank" rel="noopener noreferrer nofollow">Ada</a>' }));
+    expect(html).toContain('/?mailto=mailto%3Aada%40example.com');
+    expect(html).not.toMatch(/href=&quot;mailto:/);
   });
 });
