@@ -13,6 +13,7 @@ import { Store } from './db.js';
 import { MailService } from './imap/mail.js';
 import { ImapPool } from './imap/pool.js';
 import { ComposeService } from './mail/send.js';
+import { SnoozeService } from './mail/snooze.js';
 import { PushService } from './push/service.js';
 import { createPushTransport, vapidKeysFromSeed, type PushTransport } from './push/webpush.js';
 import type { RemoteImage } from './net/remoteImages.js';
@@ -52,6 +53,7 @@ export interface App {
   store: Store;
   pool: ImapPool;
   push: PushService;
+  snooze: SnoozeService;
 }
 
 export async function buildApp(
@@ -93,7 +95,19 @@ export async function buildApp(
     },
     log: (msg, extra) => app.log.warn(extra ?? {}, msg),
   });
-  pool.onNewMail = (userId, accountId, messages) => void push.notifyNewMail(userId, accountId, messages);
+  const snooze = new SnoozeService({
+    store,
+    mail,
+    maxMessageBytes: config.maxMessageBytes,
+    notify: (userId, accountId, messages) => push.notifySnoozeEnded(userId, accountId, messages),
+    emit: (userId, event) => pool.onEvent(userId, event),
+    log: (msg, extra) => app.log.warn(extra ?? {}, msg),
+  });
+  pool.onNewMail = (userId, accountId, messages) => {
+    // Snoozed mail coming back gets its own notification from the snooze service.
+    const fresh = messages.filter((m) => !snooze.wasResurfaced(userId, accountId, m.messageId));
+    if (fresh.length > 0) void push.notifyNewMail(userId, accountId, fresh);
+  };
   const compose = new ComposeService(store, mail, {
     maxMessageBytes: config.maxMessageBytes,
     blockPrivateHosts: config.blockPrivateMailHosts,
@@ -124,6 +138,7 @@ export async function buildApp(
     mail,
     compose,
     push,
+    snooze,
     vapidPublicKey: vapid.publicKey,
     pushHostCheck: opts.pushHostCheck,
     fetchImage: opts.fetchImage,
@@ -144,12 +159,15 @@ export async function buildApp(
   // Users with notifications on some device are watched even while no browser is open.
   app.addHook('onReady', async () => {
     for (const userId of store.pushUserIds()) pool.setBackground(userId, true);
+    // Also wakes messages whose snooze ended while the server was down.
+    snooze.start();
   });
 
   app.addHook('onClose', async () => {
+    await snooze.stop();
     await pool.close();
     if (!opts.store) store.close();
   });
 
-  return { app, store, pool, push };
+  return { app, store, pool, push, snooze };
 }

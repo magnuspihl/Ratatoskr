@@ -326,6 +326,7 @@ export class ImapPool {
             uidValidity,
             from: from ? { name: from.name ?? '', address: from.address ?? '' } : null,
             subject: m.envelope?.subject ?? '',
+            messageId: m.envelope?.messageId ?? null,
           };
         });
       if (unread.length > 0) this.onNewMail(userId, accountId, unread);

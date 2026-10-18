@@ -29,6 +29,8 @@ const SPECIAL_USE: Record<string, SpecialUse> = {
   '\\Junk': 'junk',
   '\\All': 'all',
   '\\Flagged': 'flagged',
+  // RFC 9979. Only marks the folder; IMAP has no wake-up time, so Ratatoskr keeps that itself.
+  '\\Snoozed': 'snoozed',
 };
 
 /** Extra name fallbacks on top of ImapFlow's built-in localized name detection. */
@@ -38,6 +40,7 @@ const NAME_FALLBACKS: Partial<Record<SpecialUse, RegExp>> = {
   trash: /^(trash|deleted|deleted items|deleted messages|bin|papierkorb|corbeille|papperskorg|papirkurv)$/i,
   archive: /^(archives?|archiv|arkiv)$/i,
   junk: /^(junk|spam|junk e-?mail|bulk mail|skräppost|uønsket)$/i,
+  snoozed: /^(snoozed|zurückgestellt|en attente|snoozade|udsat)$/i,
 };
 
 export class MessageGoneError extends Error {}
@@ -407,6 +410,11 @@ export class MailService {
     }
   }
 
+  /** Throws StaleError if the folder's UIDVALIDITY no longer matches. */
+  async assertUidValidity(userId: string, ref: Omit<MessageRef, 'uid'>) {
+    await this.pool.withMailbox(userId, ref.accountId, ref.folder, async (_client, mailbox) => this.checkValidity(mailbox, { ...ref, uid: 0 }));
+  }
+
   async fetchRaw(
     userId: string,
     ref: MessageRef,
@@ -484,15 +492,17 @@ export class MailService {
   // ---- actions ---------------------------------------------------------------
 
   /**
-   * Find the Archive folder, creating one (inside the personal namespace) if the account has none.
-   * Creating it is the least surprising fallback: "archive" keeps working like in other clients.
+   * Find a special-use folder, creating one (inside the personal namespace) if the account has
+   * none. Creating it is the least surprising fallback: "archive" and "snooze" keep working like
+   * in other clients.
    */
-  async ensureArchive(userId: string, accountId: string): Promise<{ path: string; created: boolean }> {
-    const existing = await this.specialFolder(userId, accountId, 'archive');
+  async ensureFolder(userId: string, accountId: string, use: 'archive' | 'snoozed'): Promise<{ path: string; created: boolean }> {
+    const existing = await this.specialFolder(userId, accountId, use);
     if (existing) return { path: existing, created: false };
+    const name = use === 'archive' ? 'Archive' : 'Snoozed';
     try {
       const res = await this.pool.withClient(userId, accountId, async (client) => {
-        const created = await client.mailboxCreate(['Archive']);
+        const created = await client.mailboxCreate([name]);
         await client.mailboxSubscribe(created.path).catch(() => undefined);
         return created;
       });
@@ -500,8 +510,53 @@ export class MailService {
       return { path: res.path, created: true };
     } catch (err) {
       const e = err as { responseText?: string; message?: string };
-      throw new MailServerError(`This account has no Archive folder and one could not be created: ${e.responseText || e.message}`, 'protocol');
+      throw new MailServerError(`This account has no ${name} folder and one could not be created: ${e.responseText || e.message}`, 'protocol');
     }
+  }
+
+  /**
+   * Put a message back into INBOX as if it had just arrived (the end of a snooze): it is appended
+   * with the current time as its arrival date, so it sorts to the top, and removed from `ref`'s
+   * folder. Flags are kept, except \Seen when `markUnread`. Messages too large to download are
+   * moved instead (keeping their old date). `beforeAppend` runs first with the Message-ID, so the
+   * new-mail watcher can tell this message from real new mail.
+   *
+   * Returns null if the message is no longer there.
+   */
+  async resurface(
+    userId: string,
+    ref: MessageRef,
+    opts: { markUnread: boolean; maxBytes: number; beforeAppend?: (messageId: string | null) => void },
+  ): Promise<{ uid: number | null; uidValidity: string | null; messageId: string | null; from: Address | null; subject: string } | null> {
+    const moved = await this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox) => {
+      if (mailbox.uidValidity.toString() !== ref.uidValidity) return null;
+      const uid = String(ref.uid);
+      const meta = await client.fetchOne(uid, { uid: true, flags: true, envelope: true, size: true }, { uid: true });
+      if (!meta) return null;
+      const messageId = meta.envelope?.messageId ?? null;
+      const info = { messageId, from: addresses(meta.envelope?.from)[0] ?? null, subject: meta.envelope?.subject ?? '' };
+      opts.beforeAppend?.(messageId);
+      const drop = new Set(['\\Deleted', '\\Recent', ...(opts.markUnread ? ['\\Seen'] : [])]);
+      const flags = [...(meta.flags ?? [])].filter((f) => !drop.has(f));
+      if ((meta.size ?? 0) <= opts.maxBytes) {
+        const full = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
+        if (!full || !full.source) return null;
+        const res = await client.append('INBOX', full.source, flags, new Date());
+        if (!res) throw new MailServerError('Could not put the message back into the inbox', 'protocol');
+        await client.messageDelete(uid, { uid: true });
+        return { ...info, uid: res.uid ?? null, uidValidity: res.uidValidity?.toString() ?? null };
+      }
+      if (opts.markUnread) await client.messageFlagsRemove(uid, ['\\Seen'], { uid: true });
+      const res = await client.messageMove(uid, 'INBOX', { uid: true });
+      return { ...info, uid: (res ? res.uidMap?.get(ref.uid) : undefined) ?? null, uidValidity: (res ? res.uidValidity?.toString() : undefined) ?? null };
+    });
+    if (!moved || (moved.uid && moved.uidValidity) || !moved.messageId) return moved;
+    // No UIDPLUS: find the message in INBOX by Message-ID.
+    const id = moved.messageId;
+    return this.pool.withMailbox(userId, ref.accountId, 'INBOX', async (client, mailbox) => {
+      const hits = (await client.search({ header: { 'message-id': id } }, { uid: true })) || [];
+      return { ...moved, uid: hits.length ? Math.max(...hits) : null, uidValidity: mailbox.uidValidity.toString() };
+    });
   }
 
   /**
@@ -518,6 +573,7 @@ export class MailService {
     action: MessageAction,
   ): Promise<{ undo: UndoInfo | null; permanent: boolean; createdFolder: string | null }> {
     const none = { undo: null, permanent: false, createdFolder: null };
+    if (action.type === 'snooze' || action.type === 'unsnooze') throw new Error('Snoozing is handled by SnoozeService');
     if (uids.length === 0) return none;
     const range = uids.join(',');
     const ref = { accountId, folder, uid: 0, uidValidity };
@@ -527,7 +583,7 @@ export class MailService {
     let createdFolder: string | null = null;
     if (action.type === 'move') destination = action.destination;
     if (action.type === 'archive') {
-      const archive = await this.ensureArchive(userId, accountId);
+      const archive = await this.ensureFolder(userId, accountId, 'archive');
       destination = archive.path;
       if (archive.created) createdFolder = archive.path;
     }

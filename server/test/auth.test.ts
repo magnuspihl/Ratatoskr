@@ -1,4 +1,8 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildApp, type App } from '../src/app.js';
 import { FailureLimiter, hashPassword, usernameSchema, verifyPassword } from '../src/auth/password.js';
@@ -57,6 +61,28 @@ describe('failed attempt limiter', () => {
     limiter.fail('alice');
     limiter.reset('alice');
     expect(limiter.blocked('alice')).toBe(false);
+  });
+});
+
+describe('database upgrade', () => {
+  it('upgrades a shared dev database that got the password column before the snooze table', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rk-migrate-'));
+    const file = path.join(dir, 'ratatoskr.db');
+    try {
+      const key = crypto.randomBytes(32);
+      new Store(file, key).close();
+      // Recreate the state such a database is in: schema version 4, password column, no snoozes.
+      const db = new DatabaseSync(file);
+      db.exec('DROP TABLE snoozes; PRAGMA user_version = 4;');
+      db.close();
+
+      const store = new Store(file, key);
+      expect(store.db.prepare("SELECT name FROM sqlite_master WHERE name = 'snoozes'").all()).toHaveLength(1);
+      expect(store.createPasswordUser('local', 'alice', 'hash')?.hasPassword).toBe(true);
+      store.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

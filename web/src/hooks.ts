@@ -72,6 +72,12 @@ export function useMessageAction(onError: (msg: string) => void) {
         qc.setQueriesData<MessageDetail>({ queryKey: ['message'] }, (d) =>
           d && keys.has(refKey(d)) ? { ...d, [field]: action.value } : d,
         );
+      } else if (action.type === 'snooze') {
+        // Already snoozed (in the Snoozed folder): only the time changes. Anything else leaves the list.
+        update((m) => (hit(m) ? (m.snoozedUntil ? { ...m, snoozedUntil: action.until } : null) : m));
+        qc.setQueriesData<MessageDetail>({ queryKey: ['message'] }, (d) =>
+          d && keys.has(refKey(d)) && d.snoozedUntil ? { ...d, snoozedUntil: action.until } : d,
+        );
       } else update((m) => (hit(m) ? null : m));
       try {
         const result = await api.action(refs, action);
@@ -96,10 +102,14 @@ export function useMessageAction(onError: (msg: string) => void) {
 /** In front of the user right now: phone notifications are held back while this is true. */
 const isActive = () => document.visibilityState === 'visible' && document.hasFocus();
 
+export type SnoozeEndedEvent = Extract<ServerEvent, { type: 'snoozeEnded' }>;
+
 /** One WebSocket per browser session; reconnects with backoff. Reports presence to the server. */
-export function useLiveUpdates(enabled: boolean) {
+export function useLiveUpdates(enabled: boolean, onSnoozeEnded?: (ev: SnoozeEndedEvent) => void) {
   const qc = useQueryClient();
   const timer = useRef<number | null>(null);
+  const snoozeEnded = useRef(onSnoozeEnded);
+  snoozeEnded.current = onSnoozeEnded;
   useEffect(() => {
     if (!enabled) return;
     let ws: WebSocket | null = null;
@@ -128,6 +138,7 @@ export function useLiveUpdates(enabled: boolean) {
         const ev = JSON.parse(String(e.data)) as ServerEvent;
         if (ev.type === 'reset') void qc.resetQueries({ queryKey: ['messages'] });
         else if (ev.type === 'mailbox') refresh();
+        else if (ev.type === 'snoozeEnded') snoozeEnded.current?.(ev);
       };
       ws.onclose = (e) => {
         if (stopped || e.code === 4401) return;
