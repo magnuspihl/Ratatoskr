@@ -275,11 +275,9 @@ PORT=5173 npm run dev         # Vite on $PORT, backend on $PORT+1 (proxied under
 
 In a git worktree (`git worktree add`), `npm run dev` also reads the main checkout's `.env`, so one
 file serves every worktree. A `.env` in the worktree overrides single values from it, and real
-environment variables override both. Worktrees also use the main checkout's database (its
-`./data`, or its `RATATOSKR_DATA_DIR`), so you stay logged in with the same users and accounts. To
-give a worktree a database of its own, set `RATATOSKR_DATA_DIR` (e.g. `./data`) in its `.env`.
-Mind that a branch's database migrations then apply to the shared database, and that every running
-dev server with notifications on will send them, so the same message can notify more than once.
+environment variables override both. The database is not shared: each worktree keeps its own
+`./data` (a relative `RATATOSKR_DATA_DIR` is relative to the worktree), because branches with
+different migrations would break each other's schema.
 
 If you open the dev server through a reverse proxy, set `RATATOSKR_BASE_URL` to that public URL.
 Vite only accepts that host name (plus `localhost`).
