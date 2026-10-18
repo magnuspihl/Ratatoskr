@@ -83,6 +83,13 @@ const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
     const cols = db.prepare("SELECT name FROM pragma_table_info('users')").all() as { name: string }[];
     if (!cols.some((c) => c.name === 'password_hash')) db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT;');
   },
+  // The user's short name for {username} in default account settings: the login name of password
+  // users, the provider's preferred_username for OIDC users (filled in at their next login).
+  (db) => {
+    const cols = db.prepare("SELECT name FROM pragma_table_info('users')").all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'username')) db.exec("ALTER TABLE users ADD COLUMN username TEXT NOT NULL DEFAULT '';");
+    db.exec("UPDATE users SET username = subject WHERE password_hash IS NOT NULL AND username = '';");
+  },
 ];
 
 /** Most devices one user can have notifications on; the oldest subscription is dropped beyond that. */
@@ -104,6 +111,8 @@ export interface User {
   subject: string;
   email: string;
   name: string;
+  /** Short user name, e.g. "alice" (may be empty for OIDC users whose provider sends none). */
+  username: string;
   preferences: Preferences;
   /** Signs in with a username and password (as opposed to OIDC). */
   hasPassword: boolean;
@@ -208,24 +217,24 @@ export class Store {
 
   // ---- users ---------------------------------------------------------------
 
-  upsertUser(issuer: string, subject: string, email: string, name: string): User {
+  upsertUser(issuer: string, subject: string, email: string, name: string, username = ''): User {
     const existing = this.db
       .prepare('SELECT id FROM users WHERE issuer = ? AND subject = ?')
       .get(issuer, subject) as { id: string } | undefined;
     if (existing) {
-      this.db.prepare('UPDATE users SET email = ?, name = ? WHERE id = ?').run(email, name, existing.id);
+      this.db.prepare('UPDATE users SET email = ?, name = ?, username = ? WHERE id = ?').run(email, name, username, existing.id);
       return this.getUser(existing.id)!;
     }
     const id = crypto.randomUUID();
     this.db
-      .prepare('INSERT INTO users (id, issuer, subject, email, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, issuer, subject, email, name, Date.now());
+      .prepare('INSERT INTO users (id, issuer, subject, email, name, username, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, issuer, subject, email, name, username, Date.now());
     return this.getUser(id)!;
   }
 
   getUser(id: string): User | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as
-      | { id: string; issuer: string; subject: string; email: string; name: string; preferences: string; password_hash: string | null }
+      | { id: string; issuer: string; subject: string; email: string; name: string; username: string; preferences: string; password_hash: string | null }
       | undefined;
     if (!row) return null;
     let prefs: Partial<Preferences> = {};
@@ -240,6 +249,7 @@ export class Store {
       subject: row.subject,
       email: row.email,
       name: row.name,
+      username: row.username,
       preferences: { ...DEFAULT_PREFERENCES, ...prefs },
       hasPassword: row.password_hash !== null,
     };
@@ -263,10 +273,10 @@ export class Store {
     const email = username.includes('@') ? username : '';
     const res = this.db
       .prepare(
-        `INSERT INTO users (id, issuer, subject, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO users (id, issuer, subject, email, name, username, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (issuer, subject) DO NOTHING`,
       )
-      .run(id, issuer, username, email, username, passwordHash, Date.now());
+      .run(id, issuer, username, email, username, username, passwordHash, Date.now());
     return res.changes > 0 ? this.getUser(id) : null;
   }
 
