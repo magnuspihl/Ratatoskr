@@ -2,8 +2,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeAll, describe, expect, it } from 'vitest';
-import type { AccountView, MessageDetail } from '../../shared/types';
-import { Reader } from '../src/components/Reader';
+import { groupConversations } from '../../shared/threads';
+import type { AccountView, MessageDetail, MessageSummary } from '../../shared/types';
+import { Reader, replyTarget } from '../src/components/Reader';
 import type { ResolvedTheme } from '../src/hooks';
 import { refKey } from '../src/util';
 
@@ -118,5 +119,84 @@ describe('message notices', () => {
     expect(html).toContain('view-toggles');
     expect(html).not.toContain('Paper');
     expect(html).toContain('>Text<');
+  });
+});
+
+describe('conversation view', () => {
+  const summary = (over: Partial<MessageSummary>): MessageSummary => ({
+    ...ref,
+    messageId: '<orig@example.com>',
+    inReplyTo: null,
+    references: [],
+    subject: 'Hello',
+    from: [{ name: 'Ada Lovelace', address: 'ada@example.com' }],
+    to: [{ name: 'Magnus', address: 'me@example.com' }],
+    date: '2026-10-18T09:00:00Z',
+    snippet: 'Are you free for lunch?',
+    seen: true,
+    flagged: false,
+    answered: false,
+    draft: false,
+    hasAttachments: false,
+    size: 100,
+    ...over,
+  });
+  const original = summary({});
+  const myReplyRef = { accountId: 'a1', folder: 'Sent', uid: 3, uidValidity: '9' };
+  const myReply = summary({
+    ...myReplyRef,
+    messageId: '<reply@example.com>',
+    inReplyTo: '<orig@example.com>',
+    references: ['<orig@example.com>'],
+    subject: 'Re: Hello',
+    from: [{ name: 'Magnus', address: 'me@example.com' }],
+    to: [{ name: 'Ada Lovelace', address: 'ada@example.com' }],
+    date: '2026-10-18T09:30:00Z',
+    snippet: 'Sure, noon works',
+  });
+
+  function renderConversation() {
+    const conversation = groupConversations([original], [myReply])[0]!;
+    const qc = new QueryClient();
+    qc.setQueryData(['message', refKey(myReplyRef), 'auto'], detail({ ...myReplyRef, subject: 'Re: Hello', from: myReply.from, to: myReply.to, text: 'Sure, noon works', html: null }));
+    return renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: qc },
+        createElement(Reader, {
+          openRef: ref,
+          conversation,
+          account,
+          multipleAccounts: false,
+          folders: undefined,
+          isDrafts: false,
+          theme: 'dark',
+          markReadOnOpen: false,
+          onAction: noop,
+          snoozeSignal: 0,
+          onReply: noop,
+          onBack: noop,
+          onGone: noop,
+        }),
+      ),
+    );
+  }
+
+  it('shows the original and my reply from Sent together, under the first subject with a count', () => {
+    const html = renderConversation();
+    expect(html).toMatch(/<h2 class="msg-subject">Hello<span class="msg-count">2<\/span><\/h2>/);
+  });
+
+  it('folds the older message to a summary line and opens the newest one', () => {
+    const html = renderConversation();
+    expect(html).toMatch(/<button class="msg-card msg-collapsed"[^>]*>.*Ada Lovelace.*Are you free for lunch\?/);
+    expect(html).toContain('Sure, noon works');
+    expect(html.indexOf('Are you free for lunch?')).toBeLessThan(html.indexOf('Sure, noon works'));
+  });
+
+  it('replies to the newest message of the conversation', () => {
+    const conversation = groupConversations([original], [myReply])[0]!;
+    expect(replyTarget(conversation, ref)).toEqual(myReplyRef);
+    expect(replyTarget(undefined, ref)).toEqual(ref);
   });
 });

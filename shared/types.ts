@@ -71,6 +71,9 @@ export interface MessageSummary {
   uid: number;
   uidValidity: string;
   messageId: string | null;
+  /** Parent's Message-ID; with `references`, what ties the message to its conversation. */
+  inReplyTo: string | null;
+  references: string[];
   subject: string;
   from: Address[];
   to: Address[];
@@ -96,6 +99,11 @@ export interface AccountCursor {
 
 export interface ListResponse {
   messages: MessageSummary[];
+  /**
+   * More messages of the listed messages' conversations that are not in `messages`: your replies
+   * in the Sent folder, and older ones from the listed folder.
+   */
+  related: MessageSummary[];
   /** Opaque cursor for the next page, or null when every source is exhausted. */
   cursor: string | null;
   /** Accounts that could not be queried, with a human-readable reason. */

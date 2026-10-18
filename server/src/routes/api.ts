@@ -374,7 +374,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       const limit = q.limit ?? req.user!.preferences.pageSize;
       const list = await mail.listMessages(userId, sources, q.cursor ?? null, limit, { text: q.q ?? '', unread: q.unread === '1' });
       const until = snoozedUntil(userId);
-      for (const m of list.messages) {
+      for (const m of [...list.messages, ...list.related]) {
         const t = until(m);
         if (t) m.snoozedUntil = t;
       }
