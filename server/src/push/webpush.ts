@@ -1,8 +1,11 @@
 import crypto from 'node:crypto';
+import https from 'node:https';
+import net from 'node:net';
+import { publicOnlyLookup } from '../net/ssrf.js';
 
 /**
  * Minimal Web Push sender: message encryption (RFC 8291, aes128gcm from RFC 8188) and VAPID
- * authentication (RFC 8292), on top of node:crypto and fetch. No third-party push library.
+ * authentication (RFC 8292), on top of node:crypto and node:https. No third-party push library.
  */
 
 export interface PushSubscriptionKeys {
@@ -34,28 +37,43 @@ export function vapidKeysFromSeed(seed: Buffer): VapidKeys {
   return { publicKey: b64u(pub), privateKey };
 }
 
-/**
- * Hosts of the push services browsers actually use. The endpoint URL comes from the browser, so
- * without this list a user could make the server POST to arbitrary (internal) URLs.
- */
-const PUSH_HOST_SUFFIXES = [
-  'fcm.googleapis.com', // Chrome, Edge on Android, Samsung Internet, Opera, Brave
-  'android.googleapis.com',
-  'push.services.mozilla.com', // Firefox
-  'push.apple.com', // Safari, iOS/iPadOS home screen apps
-  'notify.windows.com', // Edge on Windows
-];
+export class PushEndpointError extends Error {}
 
-export function isAllowedPushEndpoint(endpoint: string): boolean {
+/**
+ * Checks the shape of a push endpoint URL from the browser. Any HTTPS push service is allowed
+ * (Chrome/FCM, Apple, Mozilla, Windows, and whatever Vivaldi, Brave & co. use), but the URL comes
+ * from the browser, so where it may point is restricted: no credentials, the standard port, and
+ * no IP literals or reserved names. That the host resolves only to public addresses is enforced
+ * when connecting (see sendPush).
+ */
+export function checkPushEndpoint(endpoint: string): URL {
   let url: URL;
   try {
     url = new URL(endpoint);
   } catch {
+    throw new PushEndpointError('Invalid push endpoint');
+  }
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) {
+    throw new PushEndpointError(`Unsupported push service (${host || 'no host'})`);
+  }
+  // Chromium builds without Google API keys hand out endpoints on this placeholder host.
+  if (host.endsWith('.invalid')) {
+    throw new PushEndpointError(`This browser has no working push service (${host}). Try another browser.`);
+  }
+  if (net.isIP(host.replace(/^\[|\]$/g, '')) || !host.includes('.') || /\.(localhost|local|internal|home\.arpa|test|example)$/.test(host)) {
+    throw new PushEndpointError(`Unsupported push service (${host})`);
+  }
+  return url;
+}
+
+export function isAllowedPushEndpoint(endpoint: string): boolean {
+  try {
+    checkPushEndpoint(endpoint);
+    return true;
+  } catch {
     return false;
   }
-  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return false;
-  const host = url.hostname.toLowerCase();
-  return PUSH_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
 }
 
 /** ES256 JWT for the push service at `endpoint`'s origin (RFC 8292). */
@@ -118,17 +136,38 @@ export interface PushRequest {
 
 export type PushTransport = (req: PushRequest) => Promise<PushOutcome>;
 
-/** Sends real Web Push requests with fetch. 404/410 means the subscription no longer exists. */
+/** POST to a push service, connecting only to public addresses (checked and pinned at DNS lookup). */
+function post(url: URL, headers: Record<string, string>, body: Buffer): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      url,
+      { method: 'POST', headers: { ...headers, 'content-length': String(body.length) }, lookup: publicOnlyLookup as never, timeout: 15_000 },
+      (res) => {
+        res.resume(); // the body is irrelevant; redirects are not followed
+        res.on('end', () => resolve(res.statusCode ?? 0));
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('push service timeout')));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+/** Sends real Web Push requests. 404/410 means the subscription no longer exists. */
 export function createPushTransport(keys: VapidKeys, subject: string): PushTransport {
   return async ({ subscription, payload, ttl, urgency = 'normal' }) => {
-    if (!isAllowedPushEndpoint(subscription.endpoint)) return 'gone';
+    let url: URL;
+    try {
+      url = checkPushEndpoint(subscription.endpoint);
+    } catch {
+      return 'gone';
+    }
     const body = encryptPayload(subscription, Buffer.from(JSON.stringify(payload)));
     try {
-      const res = await fetch(subscription.endpoint, {
-        method: 'POST',
-        redirect: 'error',
-        signal: AbortSignal.timeout(15_000),
-        headers: {
+      const status = await post(
+        url,
+        {
           authorization: vapidAuthorization(subscription.endpoint, keys, subject),
           'content-encoding': 'aes128gcm',
           'content-type': 'application/octet-stream',
@@ -136,10 +175,9 @@ export function createPushTransport(keys: VapidKeys, subject: string): PushTrans
           urgency,
         },
         body,
-      });
-      await res.arrayBuffer().catch(() => undefined);
-      if (res.status === 404 || res.status === 410) return 'gone';
-      return res.ok ? 'sent' : 'failed';
+      );
+      if (status === 404 || status === 410) return 'gone';
+      return status >= 200 && status < 300 ? 'sent' : 'failed';
     } catch {
       return 'failed';
     }

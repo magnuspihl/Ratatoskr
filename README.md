@@ -203,10 +203,11 @@ Every message is assumed to be hostile.
 - **Credentials:** AES-256-GCM with a random IV, and the ciphertext bound to its user and account
   (AAD), so a copied database row doesn't decrypt elsewhere. Passwords are never returned by the
   API.
-- **Notifications:** push subscription endpoints come from the browser, so the server only
-  accepts and POSTs to the known browser push services (`fcm.googleapis.com`,
-  `*.push.apple.com`, `*.push.services.mozilla.com`, `*.notify.windows.com`, ...) over HTTPS,
-  never to arbitrary URLs. Payloads are encrypted for the receiving device. The service worker
+- **Notifications:** push subscription endpoints come from the browser, so the server treats
+  them like remote image URLs. It accepts any HTTPS push service (so every browser's push service
+  works), but only on the standard port, without credentials, IP literals or reserved names. It
+  resolves DNS itself, refuses internal addresses, connects to the address it checked and never
+  follows redirects. Payloads are encrypted for the receiving device. The service worker
   only shows notifications. It caches nothing and only opens paths of the app itself.
 - **Sessions** are encrypted, HttpOnly, SameSite=Lax cookies. State-changing API calls also
   require a custom header, which cross-site pages can't send. WebSocket upgrades check

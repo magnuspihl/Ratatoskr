@@ -73,7 +73,7 @@ function browserSubscription(id: string) {
 const phone = browserSubscription('carols-phone');
 
 async function start() {
-  ctx = await buildApp(config, { store, logger: false, pushTransport: async (r) => (sent.push(r), 'sent') });
+  ctx = await buildApp(config, { store, logger: false, pushTransport: async (r) => (sent.push(r), 'sent'), pushHostCheck: async () => {} });
   await ctx.app.ready();
 }
 
@@ -110,9 +110,10 @@ afterAll(async () => {
 });
 
 describe('phone notifications for new mail', () => {
-  it('refuses subscriptions to push services it does not know', async () => {
-    const res = await api('POST', '/api/push/subscriptions', { ...phone, endpoint: 'https://internal.example.test/hook' });
+  it('refuses push endpoints on internal addresses and names the host in the error', async () => {
+    const res = await api<{ error: string }>('POST', '/api/push/subscriptions', { ...phone, endpoint: 'https://10.0.0.5/hook' });
     expect(res.status).toBe(400);
+    expect(res.json.error).toContain('10.0.0.5');
   });
 
   it('notifies about mail that arrives after notifications are switched on, not about older mail', async () => {

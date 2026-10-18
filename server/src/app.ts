@@ -62,6 +62,8 @@ export async function buildApp(
     fetchImage?: (url: string) => Promise<RemoteImage>;
     /** Replaces real Web Push delivery (tests only). */
     pushTransport?: PushTransport;
+    /** Replaces the DNS check of push service hosts (tests only). */
+    pushHostCheck?: (host: string) => Promise<void>;
   } = {},
 ): Promise<App> {
   const app = Fastify({
@@ -123,6 +125,7 @@ export async function buildApp(
     compose,
     push,
     vapidPublicKey: vapid.publicKey,
+    pushHostCheck: opts.pushHostCheck,
     fetchImage: opts.fetchImage,
   });
   live = await registerWebSocket(app, config, store, sessions, pool);
