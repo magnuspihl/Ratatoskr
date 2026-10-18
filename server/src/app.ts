@@ -13,9 +13,12 @@ import { Store } from './db.js';
 import { MailService } from './imap/mail.js';
 import { ImapPool } from './imap/pool.js';
 import { ComposeService } from './mail/send.js';
+import { PushService } from './push/service.js';
+import { createPushTransport, vapidKeysFromSeed, type PushTransport } from './push/webpush.js';
 import type { RemoteImage } from './net/remoteImages.js';
 import { registerApiRoutes } from './routes/api.js';
-import { registerWebSocket } from './routes/ws.js';
+import { inboxUnread } from '../../shared/unread.js';
+import { registerWebSocket, type LiveSessions } from './routes/ws.js';
 
 /** CSP for the application itself. Message iframes (srcdoc) inherit it, plus their own. */
 export const APP_CSP = [
@@ -48,11 +51,18 @@ export interface App {
   app: FastifyInstance;
   store: Store;
   pool: ImapPool;
+  push: PushService;
 }
 
 export async function buildApp(
   config: Config,
-  opts: { store?: Store; logger?: boolean; fetchImage?: (url: string) => Promise<RemoteImage> } = {},
+  opts: {
+    store?: Store;
+    logger?: boolean;
+    fetchImage?: (url: string) => Promise<RemoteImage>;
+    /** Replaces real Web Push delivery (tests only). */
+    pushTransport?: PushTransport;
+  } = {},
 ): Promise<App> {
   const app = Fastify({
     logger: opts.logger === false ? false : { level: config.logLevel },
@@ -68,6 +78,20 @@ export async function buildApp(
     log: (msg, extra) => app.log.info(extra ?? {}, msg),
   });
   const mail = new MailService(pool);
+  const vapid = vapidKeysFromSeed(keyring.vapidSeed);
+  let live: LiveSessions = { isUserActive: () => false };
+  const push = new PushService({
+    store,
+    transport: opts.pushTransport ?? createPushTransport(vapid, config.vapidSubject),
+    isUserActive: (userId) => live.isUserActive(userId),
+    onNoSubscriptions: (userId) => pool.setBackground(userId, false),
+    unreadCount: async (userId) => {
+      const folders = await Promise.all(store.listAccounts(userId).map((a) => mail.listFolders(userId, a.id)));
+      return folders.some((f) => f.error) ? null : inboxUnread(folders);
+    },
+    log: (msg, extra) => app.log.warn(extra ?? {}, msg),
+  });
+  pool.onNewMail = (userId, accountId, messages) => void push.notifyNewMail(userId, accountId, messages);
   const compose = new ComposeService(store, mail, {
     maxMessageBytes: config.maxMessageBytes,
     blockPrivateHosts: config.blockPrivateMailHosts,
@@ -90,8 +114,18 @@ export async function buildApp(
   app.get('/healthz', async () => ({ ok: true }));
 
   await registerAuthRoutes(app, config, store, sessions);
-  await registerApiRoutes(app, { config, store, sessions, pool, mail, compose, fetchImage: opts.fetchImage });
-  await registerWebSocket(app, config, store, sessions, pool);
+  await registerApiRoutes(app, {
+    config,
+    store,
+    sessions,
+    pool,
+    mail,
+    compose,
+    push,
+    vapidPublicKey: vapid.publicKey,
+    fetchImage: opts.fetchImage,
+  });
+  live = await registerWebSocket(app, config, store, sessions, pool);
 
   // Static frontend (production build). In development Vite serves the UI and proxies /api.
   if (fs.existsSync(path.join(config.webDir, 'index.html'))) {
@@ -104,10 +138,15 @@ export async function buildApp(
     });
   }
 
+  // Users with notifications on some device are watched even while no browser is open.
+  app.addHook('onReady', async () => {
+    for (const userId of store.pushUserIds()) pool.setBackground(userId, true);
+  });
+
   app.addHook('onClose', async () => {
     await pool.close();
     if (!opts.store) store.close();
   });
 
-  return { app, store, pool };
+  return { app, store, pool, push };
 }

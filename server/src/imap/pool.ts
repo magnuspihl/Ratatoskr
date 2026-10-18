@@ -1,6 +1,7 @@
 import type { ImapFlow, ListResponse, MailboxObject } from 'imapflow';
 import type { ServerEvent } from '../../../shared/types.js';
 import type { AccountSecret, Store } from '../db.js';
+import type { NewMail } from '../push/notify.js';
 import { connectImap, MailServerError } from './connect.js';
 
 export interface PoolOptions {
@@ -23,6 +24,8 @@ interface Watcher {
   stopped: boolean;
   retry: NodeJS.Timeout | null;
   backoffMs: number;
+  /** Serialises new-mail checks so one arrival is never reported twice. */
+  checking: Promise<void>;
 }
 
 export class NotFoundError extends Error {}
@@ -31,8 +34,10 @@ const FOLDER_CACHE_MS = 60_000;
 
 /**
  * Lazily opened IMAP connections, one command connection per (user, account), closed after an
- * idle timeout. Separately, while a user has a live browser session, one IDLE connection per
- * account watches INBOX and reports changes.
+ * idle timeout. Separately, while a user has a live browser session or notifications enabled on
+ * some device ("background" users), one IDLE connection per account watches INBOX and reports
+ * changes. For background users it also reports newly arrived unread messages (onNewMail),
+ * remembering the highest UID seen per account so nothing is reported twice, even across restarts.
  *
  * There is no message cache: every request goes to the IMAP server.
  */
@@ -40,8 +45,10 @@ export class ImapPool {
   private readonly conns = new Map<string, CommandConnection>();
   private readonly watchers = new Map<string, Map<string, Watcher>>();
   private readonly watchRefs = new Map<string, number>();
+  private readonly background = new Set<string>();
   private readonly sweeper: NodeJS.Timeout;
   onEvent: (userId: string, event: ServerEvent) => void = () => {};
+  onNewMail: (userId: string, accountId: string, messages: NewMail[]) => void = () => {};
 
   constructor(
     private readonly store: Store,
@@ -144,7 +151,7 @@ export class ImapPool {
     if (w) {
       this.stopWatcher(w);
       this.watchers.get(userId)!.delete(accountId);
-      if ((this.watchRefs.get(userId) ?? 0) > 0) this.startWatcher(userId, accountId);
+      if (this.watching(userId)) this.startWatcher(userId, accountId);
     }
   }
 
@@ -161,11 +168,15 @@ export class ImapPool {
 
   // ---- live updates --------------------------------------------------------
 
+  private watching(userId: string): boolean {
+    return (this.watchRefs.get(userId) ?? 0) > 0 || this.background.has(userId);
+  }
+
   /** Called when a browser session for this user opens. Reference counted per user. */
   watch(userId: string) {
     const refs = (this.watchRefs.get(userId) ?? 0) + 1;
     this.watchRefs.set(userId, refs);
-    if (refs > 1) return;
+    if (refs > 1 || this.background.has(userId)) return;
     for (const acc of this.store.listAccounts(userId)) this.startWatcher(userId, acc.id);
   }
 
@@ -176,14 +187,46 @@ export class ImapPool {
       return;
     }
     this.watchRefs.delete(userId);
+    if (!this.background.has(userId)) this.stopAll(userId);
+  }
+
+  /**
+   * Keep watching a user's inboxes without a browser session and report new mail (the user has
+   * notifications enabled on some device), or stop doing so.
+   *
+   * `fromNow` (notifications were just switched on) drops the stored marks, so mail that arrived
+   * while notifications were off is not reported. Without it (server start) the marks are kept and
+   * mail that arrived while the server was down is reported.
+   */
+  setBackground(userId: string, on: boolean, fromNow = false) {
+    if (on === this.background.has(userId)) return;
+    if (!on) {
+      this.background.delete(userId);
+      if ((this.watchRefs.get(userId) ?? 0) === 0) this.stopAll(userId);
+      return;
+    }
+    if (fromNow) this.store.clearInboxState(userId);
+    this.background.add(userId);
+    for (const acc of this.store.listAccounts(userId)) {
+      const w = this.watchers.get(userId)?.get(acc.id);
+      if (!w) this.startWatcher(userId, acc.id);
+      else if (w.client?.usable) this.checkNewMail(userId, acc.id, w, w.client); // starts tracking from now
+    }
+  }
+
+  isBackground(userId: string): boolean {
+    return this.background.has(userId);
+  }
+
+  private stopAll(userId: string) {
     const ws = this.watchers.get(userId);
     this.watchers.delete(userId);
     for (const w of ws?.values() ?? []) this.stopWatcher(w);
   }
 
-  /** Start watching a newly added account if the user is online. */
+  /** Start watching a newly added account if the user is online or has notifications on. */
   accountAdded(userId: string, accountId: string) {
-    if ((this.watchRefs.get(userId) ?? 0) > 0) this.startWatcher(userId, accountId);
+    if (this.watching(userId)) this.startWatcher(userId, accountId);
   }
 
   private stopWatcher(w: Watcher) {
@@ -201,7 +244,14 @@ export class ImapPool {
       this.watchers.set(userId, byAccount);
     }
     if (byAccount.has(accountId)) return;
-    const w: Watcher = { client: null, uidValidity: null, stopped: false, retry: null, backoffMs: 5_000 };
+    const w: Watcher = {
+      client: null,
+      uidValidity: null,
+      stopped: false,
+      retry: null,
+      backoffMs: 5_000,
+      checking: Promise.resolve(),
+    };
     byAccount.set(accountId, w);
     void this.runWatcher(userId, accountId, w);
   }
@@ -224,8 +274,13 @@ export class ImapPool {
       else if (w.uidValidity !== null) emit({ type: 'mailbox', accountId, folder }); // catch up after reconnect
       w.uidValidity = uv;
       w.backoffMs = 5_000;
+      // Also reports mail that arrived while disconnected (or while the server was down).
+      if (this.background.has(userId)) this.checkNewMail(userId, accountId, w, client);
       const changed = () => emit({ type: 'mailbox', accountId, folder });
-      client.on('exists', changed);
+      client.on('exists', () => {
+        changed();
+        if (this.background.has(userId)) this.checkNewMail(userId, accountId, w, client);
+      });
       client.on('expunge', changed);
       client.on('flags', changed);
       client.on('close', () => {
@@ -237,6 +292,46 @@ export class ImapPool {
       this.opts.log?.('IMAP watcher failed', { accountId, error: (err as Error).message });
       this.scheduleWatcher(userId, accountId, w);
     }
+  }
+
+  /**
+   * Report INBOX messages above the stored high-water UID that are still unread, then move the
+   * mark. Without a stored mark (first run, or UIDVALIDITY changed) only the mark is set, so
+   * enabling notifications never reports old mail.
+   */
+  private checkNewMail(userId: string, accountId: string, w: Watcher, client: ImapFlow) {
+    w.checking = w.checking.then(async () => {
+      if (w.stopped || w.client !== client || !this.background.has(userId)) return;
+      const mailbox = client.mailbox;
+      if (!mailbox || mailbox.path !== 'INBOX') return;
+      const uidValidity = mailbox.uidValidity.toString();
+      const state = this.store.getInboxState(userId, accountId);
+      if (!state || state.uidValidity !== uidValidity) {
+        // UIDNEXT is only as fresh as the SELECT, so ask for the newest message's UID instead.
+        const newest = mailbox.exists > 0 ? await client.fetchOne('*', { uid: true }) : false;
+        this.store.setInboxState(userId, accountId, uidValidity, newest ? newest.uid : Math.max(0, mailbox.uidNext - 1));
+        return;
+      }
+      // "n:*" always matches at least the newest message, even if its UID is below n.
+      const msgs = (await client.fetchAll(`${state.lastUid + 1}:*`, { uid: true, flags: true, envelope: true }, { uid: true }))
+        .filter((m) => m.uid > state.lastUid);
+      if (msgs.length === 0) return;
+      this.store.setInboxState(userId, accountId, uidValidity, Math.max(...msgs.map((m) => m.uid)));
+      const unread: NewMail[] = msgs
+        .filter((m) => !m.flags?.has('\\Seen'))
+        .map((m) => {
+          const from = m.envelope?.from?.[0];
+          return {
+            uid: m.uid,
+            uidValidity,
+            from: from ? { name: from.name ?? '', address: from.address ?? '' } : null,
+            subject: m.envelope?.subject ?? '',
+          };
+        });
+      if (unread.length > 0) this.onNewMail(userId, accountId, unread);
+    }).catch((err: unknown) => {
+      this.opts.log?.('new mail check failed', { accountId, error: (err as Error).message });
+    });
   }
 
   private scheduleWatcher(userId: string, accountId: string, w: Watcher) {
@@ -251,6 +346,8 @@ export class ImapPool {
 
   async close() {
     clearInterval(this.sweeper);
+    this.background.clear();
+    for (const userId of [...this.watchers.keys()]) this.stopAll(userId);
     for (const userId of [...this.watchRefs.keys()]) {
       this.watchRefs.set(userId, 1);
       this.unwatch(userId);

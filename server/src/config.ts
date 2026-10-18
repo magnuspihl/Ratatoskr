@@ -32,6 +32,8 @@ export interface Config {
   /** Largest total upload size (bytes) for compose attachments. */
   maxUploadBytes: number;
   webDir: string;
+  /** Contact for push services (VAPID `sub`): a mailto: or https: URL. */
+  vapidSubject: string;
 }
 
 function bool(v: string | undefined, def: boolean): boolean {
@@ -84,6 +86,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
   }
 
+  const vapidSubject =
+    env.RATATOSKR_VAPID_SUBJECT ||
+    (baseUrl.protocol === 'https:' ? baseUrl.origin : `mailto:postmaster@${baseUrl.hostname}`);
+  if (!/^(mailto:\S+@\S+|https:\/\/\S+)$/.test(vapidSubject)) {
+    errors.push('RATATOSKR_VAPID_SUBJECT must be a mailto: or https: URL');
+  }
+
   if (errors.length) throw new Error(`Invalid configuration:\n  - ${errors.join('\n  - ')}`);
 
   return {
@@ -103,5 +112,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxMessageBytes: int(env.RATATOSKR_MAX_MESSAGE_MB, 50) * 1024 * 1024,
     maxUploadBytes: int(env.RATATOSKR_MAX_UPLOAD_MB, 25) * 1024 * 1024,
     webDir: path.resolve(env.RATATOSKR_WEB_DIR || './dist/web'),
+    vapidSubject,
   };
 }

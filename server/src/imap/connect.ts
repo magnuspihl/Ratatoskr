@@ -53,6 +53,9 @@ export function createImapClient(s: ServerSettings, opts: ConnectOptions): ImapF
     auth: { user: s.user, pass: s.password },
     logger: false,
     disableAutoIdle: !opts.autoIdle,
+    // Watchers only issue the odd command; go back to IDLE quickly so arrivals aren't held back
+    // by imapflow's default 15 s pause.
+    autoIdleDelay: opts.autoIdle ? 1000 : undefined,
     maxIdleTime: 4 * 60 * 1000,
     connectionTimeout: 20_000,
     greetingTimeout: 15_000,

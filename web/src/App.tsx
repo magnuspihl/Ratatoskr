@@ -1,6 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../shared/types';
+import { inboxUnread } from '../../shared/unread';
 import { api, ApiError, type MailboxSel } from './api';
 import { AccountsDialog } from './components/AccountsDialog';
 import { Composer, type ComposerInit } from './components/Composer';
@@ -12,7 +13,8 @@ import { Sidebar } from './components/Sidebar';
 import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts } from './hooks';
 import { blankComposer, composerFor } from './replies';
 import { useRouter, type Location } from './router';
-import { HOME, listRoute, openMessageFolder, viewKey, type Route } from './routing';
+import { disablePush, notificationTarget, registerServiceWorker, setAppBadge, syncPush } from './push';
+import { HOME, listRoute, openMessageFolder, parseLocation, viewKey, type Route } from './routing';
 import { updateSticky, withSticky } from './sticky';
 import { removesFromList, swipeToAction, type Direction, type UndoStep } from './swipe';
 import { refKey, toRef } from './util';
@@ -105,6 +107,29 @@ export function App() {
   const listErrors = messagesQ.data?.pages.at(-1)?.errors ?? [];
 
   useLiveUpdates(loggedIn && accounts.length > 0);
+
+  // Notifications: register the service worker, keep this device's subscription current, and
+  // follow taps on a notification while the app is already open.
+  useEffect(() => {
+    if (!loggedIn) return;
+    registerServiceWorker();
+    void syncPush().catch(() => {});
+    if (!('serviceWorker' in navigator)) return;
+    const onMessage = (e: MessageEvent) => {
+      const data = e.data as { type?: string; url?: unknown } | null;
+      const target = data?.type === 'open' ? notificationTarget(data.url, window.location.origin) : null;
+      if (!target) return;
+      const u = new URL(target, window.location.origin);
+      go(parseLocation(u.pathname, u.search));
+    };
+    navigator.serviceWorker.addEventListener('message', onMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', onMessage);
+  }, [loggedIn, go]);
+
+  // Unread count across all inboxes on the app icon (installed app).
+  useEffect(() => {
+    if (folders.data) setAppBadge(inboxUnread(folders.data));
+  }, [folders.data]);
 
   // Deep link to an account that doesn't exist (any more): back to the unified inbox, quietly.
   useEffect(() => {
@@ -315,6 +340,9 @@ export function App() {
   }
 
   const logout = async () => {
+    // Stop this device's notifications along with the session.
+    await disablePush().catch(() => {});
+    setAppBadge(0);
     const { redirect } = await api.logout();
     qc.clear();
     window.location.href = redirect;
