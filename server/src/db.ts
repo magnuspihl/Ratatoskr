@@ -5,7 +5,20 @@ import { DatabaseSync } from 'node:sqlite';
 import type { AccountInput, AccountView, Preferences, PushSubscriptionInput, TlsMode } from '../../shared/types.js';
 import { decrypt, encrypt } from './crypto.js';
 
-const MIGRATIONS: string[] = [
+// Snoozed messages: where each one waits (IMAP folder, UIDVALIDITY, UID) and when it returns to
+// INBOX. IMAP has a "Snoozed" folder attribute but no wake-up time, so the time lives here.
+const SNOOZES_SQL = `CREATE TABLE IF NOT EXISTS snoozes (
+     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+     folder TEXT NOT NULL,
+     uid_validity TEXT NOT NULL,
+     uid INTEGER NOT NULL,
+     until INTEGER NOT NULL,
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (account_id, folder, uid_validity, uid)
+   );
+   CREATE INDEX IF NOT EXISTS snoozes_until ON snoozes(until);`;
+
+const MIGRATIONS: (string | ((db: DatabaseSync) => void))[] = [
   `CREATE TABLE users (
      id TEXT PRIMARY KEY,
      issuer TEXT NOT NULL,
@@ -61,18 +74,15 @@ const MIGRATIONS: string[] = [
      uid_validity TEXT NOT NULL,
      last_uid INTEGER NOT NULL
    );`,
-  // Snoozed messages: where each one waits (IMAP folder, UIDVALIDITY, UID) and when it returns to
-  // INBOX. IMAP has a "Snoozed" folder attribute but no wake-up time, so the time lives here.
-  `CREATE TABLE snoozes (
-     account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-     folder TEXT NOT NULL,
-     uid_validity TEXT NOT NULL,
-     uid INTEGER NOT NULL,
-     until INTEGER NOT NULL,
-     created_at INTEGER NOT NULL,
-     PRIMARY KEY (account_id, folder, uid_validity, uid)
-   );
-   CREATE INDEX snoozes_until ON snoozes(until);`,
+  SNOOZES_SQL,
+  // Username/password login: such users have issuer 'local' and the normalised username as subject.
+  // Dev databases shared between branches may already be at this version with the password column
+  // and without snoozes (both branches used the same migration number), so repair either way.
+  (db) => {
+    db.exec(SNOOZES_SQL);
+    const cols = db.prepare("SELECT name FROM pragma_table_info('users')").all() as { name: string }[];
+    if (!cols.some((c) => c.name === 'password_hash')) db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT;');
+  },
 ];
 
 /** Most devices one user can have notifications on; the oldest subscription is dropped beyond that. */
@@ -94,6 +104,8 @@ export interface User {
   email: string;
   name: string;
   preferences: Preferences;
+  /** Signs in with a username and password (as opposed to OIDC). */
+  hasPassword: boolean;
 }
 
 /** A snoozed message: where it waits and when it returns to INBOX (ms since the epoch). */
@@ -177,7 +189,9 @@ export class Store {
     for (let v = current; v < MIGRATIONS.length; v++) {
       this.db.exec('BEGIN');
       try {
-        this.db.exec(MIGRATIONS[v]!);
+        const m = MIGRATIONS[v]!;
+        if (typeof m === 'string') this.db.exec(m);
+        else m(this.db);
         this.db.exec(`PRAGMA user_version = ${v + 1}`);
         this.db.exec('COMMIT');
       } catch (err) {
@@ -210,7 +224,7 @@ export class Store {
 
   getUser(id: string): User | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as
-      | { id: string; issuer: string; subject: string; email: string; name: string; preferences: string }
+      | { id: string; issuer: string; subject: string; email: string; name: string; preferences: string; password_hash: string | null }
       | undefined;
     if (!row) return null;
     let prefs: Partial<Preferences> = {};
@@ -226,7 +240,42 @@ export class Store {
       email: row.email,
       name: row.name,
       preferences: { ...DEFAULT_PREFERENCES, ...prefs },
+      hasPassword: row.password_hash !== null,
     };
+  }
+
+  countUsers(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
+  }
+
+  /** A password user and their stored hash, by normalised username. */
+  findPasswordUser(issuer: string, username: string): { user: User; passwordHash: string } | null {
+    const row = this.db
+      .prepare('SELECT id, password_hash FROM users WHERE issuer = ? AND subject = ? AND password_hash IS NOT NULL')
+      .get(issuer, username) as { id: string; password_hash: string } | undefined;
+    return row ? { user: this.getUser(row.id)!, passwordHash: row.password_hash } : null;
+  }
+
+  /** Creates a password user; null if the username is taken. */
+  createPasswordUser(issuer: string, username: string, passwordHash: string): User | null {
+    const id = crypto.randomUUID();
+    const email = username.includes('@') ? username : '';
+    const res = this.db
+      .prepare(
+        `INSERT INTO users (id, issuer, subject, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (issuer, subject) DO NOTHING`,
+      )
+      .run(id, issuer, username, email, username, passwordHash, Date.now());
+    return res.changes > 0 ? this.getUser(id) : null;
+  }
+
+  setPasswordHash(userId: string, passwordHash: string) {
+    this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash IS NOT NULL').run(passwordHash, userId);
+  }
+
+  getPasswordHash(userId: string): string | null {
+    const row = this.db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as { password_hash: string | null } | undefined;
+    return row?.password_hash ?? null;
   }
 
   setPreferences(userId: string, prefs: Preferences) {

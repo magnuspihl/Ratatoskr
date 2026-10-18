@@ -17,8 +17,9 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 - Several IMAP/SMTP accounts per user (host, port, TLS/STARTTLS, credentials, separate SMTP
   settings, display name, colour). Connections are tested when you save. Passwords are encrypted
   at rest (AES-256-GCM) and never sent back to the browser.
-- Login with any OpenID Connect provider (Authentik, Keycloak, …). Each OIDC user owns their own
-  accounts, with strict per-user isolation.
+- Login with a username and password, with any OpenID Connect provider (Authentik, Keycloak, …),
+  or both side by side; see [Login](#login). Each user owns their own accounts, with strict
+  per-user isolation.
 - Unified inbox across all accounts (merged by date, paginated with per-account cursors), plus
   per-account folder trees with unread counts. Live updates via IMAP IDLE pushed over one
   WebSocket per browser session.
@@ -48,7 +49,8 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 
 ## Quick start (Docker)
 
-1. Register an OIDC client at your identity provider (see [OIDC setup](#oidc-setup)).
+1. Register an OIDC client at your identity provider (see [OIDC setup](#oidc-setup)). To use
+   username/password login only, skip this and drop the `OIDC_*` lines in step 3.
 2. Create a `.env` next to `docker-compose.yml`:
 
    ```sh
@@ -74,10 +76,13 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | --- | --- | --- | --- |
 | `RATATOSKR_BASE_URL` | yes (prod) | `http://localhost:8080` | Public URL of the app. Used for the OIDC redirect URI, cookie `Secure` flag and WebSocket origin check. |
 | `RATATOSKR_SECRET_KEY` | yes | – | Master secret, at least 32 characters (`openssl rand -base64 48`). Subkeys for credential encryption, session cookies and URL signing are derived from it with HKDF. **If you change it, stored account passwords can no longer be decrypted.** |
-| `OIDC_ISSUER_URL` | yes | – | Issuer URL; `/.well-known/openid-configuration` is discovered from it. |
-| `OIDC_CLIENT_ID` | yes | – | Client ID. |
+| `RATATOSKR_PASSWORD_LOGIN` | no | `true` without OIDC, `false` with OIDC | Username/password login. |
+| `RATATOSKR_REGISTRATION` | no | `first` | Who may create a password account: `open` (anyone), `first` (only the first user of an empty instance) or `closed`. |
+| `OIDC_ISSUER_URL` | for OIDC | – | Issuer URL; `/.well-known/openid-configuration` is discovered from it. |
+| `OIDC_CLIENT_ID` | for OIDC | – | Client ID. |
 | `OIDC_CLIENT_SECRET` | usually | – | Client secret (confidential client). |
 | `OIDC_SCOPES` | no | `openid email profile` | Requested scopes. |
+| `OIDC_LABEL` | no | `Single sign-on` | Provider name on the login button ("Sign in with …"), e.g. `Authentik`. |
 | `RATATOSKR_TRUST_PROXY` | no | `false` | Trust `X-Forwarded-*` headers. Set to `true` behind a reverse proxy. |
 | `RATATOSKR_DATA_DIR` | no | `./data` (`/data` in the image) | Where `ratatoskr.db` (SQLite) lives. |
 | `PORT` / `HOST` | no | `8080` / `0.0.0.0` | Listen address. |
@@ -87,7 +92,7 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | `RATATOSKR_MAX_UPLOAD_MB` | no | `25` | Largest total attachment upload when composing. |
 | `RATATOSKR_VAPID_SUBJECT` | no | `RATATOSKR_BASE_URL` if it is `https://`, else `mailto:postmaster@<host>` | Contact sent to push services (Apple, Google, Mozilla) with every notification: a `mailto:` or `https:` URL. |
 | `LOG_LEVEL` | no | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
-| `RATATOSKR_DEV_LOGIN` | no | `false` | Development only: log in as a local dev user without OIDC. Ignored when `NODE_ENV=production` (always set in the image). |
+| `RATATOSKR_DEV_LOGIN` | no | `false` | Development only: log in as a local dev user without a password or OIDC. Ignored when `NODE_ENV=production` (always set in the image). |
 | `RATATOSKR_DEV_ALLOWED_HOST_SUFFIX` | no | – | Development only: also serve the dev server on any host ending in this suffix (see [Development](#development)). Ignored when `NODE_ENV=production` and by the production build. |
 
 ### Notifications
@@ -145,6 +150,26 @@ the inbox right away) or snooze it again to change the time. A snooze can be und
 notice that confirms it. Snoozes that came due while the server was down are handled when it
 starts. A message you move out of the Snoozed folder yourself, in Ratatoskr or another mail app,
 stays where you put it.
+
+### Login
+
+Two login methods are available, alone or together:
+
+- **Username and password.** On by default when no OIDC provider is configured. With OIDC, turn
+  it on with `RATATOSKR_PASSWORD_LOGIN=true`. Usernames are case-insensitive (an email address
+  works); passwords need at least 10 characters and are stored as scrypt hashes. By default only
+  the first person to open a fresh instance can create an account (`RATATOSKR_REGISTRATION=first`).
+  To let others sign up, set `RATATOSKR_REGISTRATION=open` (for a while, or permanently on a
+  private network), then back to `closed`. With open registration on a public instance, also set
+  `RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS=true` so strangers can't point IMAP/SMTP at your LAN. After 10 wrong passwords for one username, or 30 from
+  one IP address, logins are refused for 15 minutes. Users change their password in **Settings**.
+- **OpenID Connect** (Authentik, Keycloak, …): see below.
+
+Password users and OIDC users are separate accounts, even if they share an email address.
+
+Sessions are encrypted cookies valid for 14 days. They can't be revoked one by one: changing a
+password doesn't sign out other devices. Changing `RATATOSKR_SECRET_KEY` signs everyone out (and
+makes stored mail passwords unreadable).
 
 ### OIDC setup
 
@@ -244,9 +269,17 @@ tests).
 
 ```sh
 npm install
-cp .env.example .env          # set RATATOSKR_SECRET_KEY; for local work you can use RATATOSKR_DEV_LOGIN=true
+cp .env.example .env          # set RATATOSKR_SECRET_KEY; without OIDC you get password login (or use RATATOSKR_DEV_LOGIN=true)
 PORT=5173 npm run dev         # Vite on $PORT, backend on $PORT+1 (proxied under /api and /auth)
 ```
+
+In a git worktree (`git worktree add`), `npm run dev` also reads the main checkout's `.env`, so one
+file serves every worktree. A `.env` in the worktree overrides single values from it, and real
+environment variables override both. Worktrees also use the main checkout's database (its
+`./data`, or its `RATATOSKR_DATA_DIR`), so you stay logged in with the same users and accounts. To
+give a worktree a database of its own, set `RATATOSKR_DATA_DIR` (e.g. `./data`) in its `.env`.
+Mind that a branch's database migrations then apply to the shared database, and that every running
+dev server with notifications on will send them, so the same message can notify more than once.
 
 If you open the dev server through a reverse proxy, set `RATATOSKR_BASE_URL` to that public URL.
 Vite only accepts that host name (plus `localhost`).
@@ -273,7 +306,7 @@ logins always return to that one host.
 ```
 server/src
   app.ts            Fastify setup, security headers, static files
-  auth/             OIDC login (openid-client) and encrypted session cookies
+  auth/             OIDC login (openid-client), password login (scrypt) and encrypted session cookies
   db.ts             SQLite store: users, encrypted accounts, preferences, recent recipients
   imap/pool.ts      Lazy per-account IMAP connections with idle timeout; IDLE watchers
   imap/mail.ts      Folders, unified listing (k-way merge with per-account UID cursors), actions

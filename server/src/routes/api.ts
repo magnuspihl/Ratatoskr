@@ -8,6 +8,7 @@ import { MessageGoneError, StaleError, type ListSource, type MailService } from 
 import { NotFoundError, type ImapPool } from '../imap/pool.js';
 import { RemoteImageCache, type RemoteImage } from '../net/remoteImages.js';
 import { displayDomain, MAX_ALLOWED_DOMAINS, normaliseDomain } from '../mail/imageAllowlist.js';
+import { FailureLimiter, hashPassword, passwordSchema, verifyPassword } from '../auth/password.js';
 import type { Sessions } from '../auth/session.js';
 import { ComposeError, type ComposeService } from '../mail/send.js';
 import { SnoozeError, type SnoozeService } from '../mail/snooze.js';
@@ -169,7 +170,26 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
 
   app.get('/api/me', async (req): Promise<Me> => {
     const u = req.user!;
-    return { id: u.id, name: u.name, email: u.email, preferences: u.preferences };
+    return { id: u.id, name: u.name, email: u.email, preferences: u.preferences, hasPassword: u.hasPassword };
+  });
+
+  const passwordChangeSchema = z.object({ current: z.string().max(1000), next: passwordSchema });
+  const passwordFailures = new FailureLimiter(10, 15 * 60 * 1000);
+
+  app.put('/api/password', async (req, reply) => {
+    const userId = uid(req);
+    const stored = store.getPasswordHash(userId);
+    if (!stored) return reply.code(400).send({ error: 'This account signs in with single sign-on' });
+    const body = passwordChangeSchema.safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: body.error.issues[0]!.message });
+    if (passwordFailures.blocked(userId)) return reply.code(429).send({ error: 'Too many failed attempts. Try again in a few minutes.' });
+    if (!(await verifyPassword(body.data.current, stored))) {
+      passwordFailures.fail(userId);
+      return reply.code(403).send({ error: 'Current password is wrong' });
+    }
+    passwordFailures.reset(userId);
+    store.setPasswordHash(userId, await hashPassword(body.data.next));
+    return { ok: true };
   });
 
   app.put('/api/preferences', async (req, reply) => {
