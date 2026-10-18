@@ -1,6 +1,6 @@
 import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ActionResult, ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
+import type { ActionResult, ClientEvent, ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
 import { undoPlan, type UndoStep } from './swipe';
 import { api, type MailboxSel } from './api';
 import { refKey } from './util';
@@ -93,7 +93,10 @@ export function useMessageAction(onError: (msg: string) => void) {
   );
 }
 
-/** One WebSocket per browser session; reconnects with backoff. */
+/** In front of the user right now: phone notifications are held back while this is true. */
+const isActive = () => document.visibilityState === 'visible' && document.hasFocus();
+
+/** One WebSocket per browser session; reconnects with backoff. Reports presence to the server. */
 export function useLiveUpdates(enabled: boolean) {
   const qc = useQueryClient();
   const timer = useRef<number | null>(null);
@@ -110,10 +113,16 @@ export function useLiveUpdates(enabled: boolean) {
         void qc.invalidateQueries({ queryKey: ['folders'] });
       }, 400);
     };
+    const sendPresence = () => {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'presence', active: isActive() } satisfies ClientEvent));
+    };
+    const presenceEvents = ['visibilitychange', 'focus', 'blur'] as const;
+    for (const ev of presenceEvents) window.addEventListener(ev, sendPresence);
     const connect = () => {
       ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/ws`);
       ws.onopen = () => {
         backoff = 1000;
+        sendPresence();
       };
       ws.onmessage = (e) => {
         const ev = JSON.parse(String(e.data)) as ServerEvent;
@@ -129,6 +138,7 @@ export function useLiveUpdates(enabled: boolean) {
     connect();
     return () => {
       stopped = true;
+      for (const ev of presenceEvents) window.removeEventListener(ev, sendPresence);
       if (retry) window.clearTimeout(retry);
       ws?.close();
     };

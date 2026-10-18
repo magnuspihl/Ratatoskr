@@ -197,12 +197,22 @@ export interface DraftResult {
   draft: MessageRef | null;
 }
 
+/** full: sender and subject in phone notifications; minimal: only "New message" and the account. */
+export type NotificationContent = 'full' | 'minimal';
+
 export interface Preferences {
   theme: 'system' | 'light' | 'dark';
   pageSize: number;
   markReadOnOpen: boolean;
   swipeLeft: SwipeAction;
   swipeRight: SwipeAction;
+  notificationContent: NotificationContent;
+}
+
+/** A browser's Web Push subscription, as produced by PushSubscription.toJSON(). */
+export interface PushSubscriptionInput {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
 }
 
 export interface Me {
@@ -216,3 +226,9 @@ export type ServerEvent =
   | { type: 'mailbox'; accountId: string; folder: string }
   | { type: 'reset'; accountId: string; folder: string }
   | { type: 'hello' };
+
+/**
+ * Sent by the browser over the WebSocket: whether the app is in front of the user right now
+ * (visible and focused). Phone notifications are skipped while any session is active.
+ */
+export type ClientEvent = { type: 'presence'; active: boolean };

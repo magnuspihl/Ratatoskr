@@ -118,6 +118,7 @@ svg { flex-shrink: 0; }
 .domain-list li + li { border-top: 1px solid var(--border); }
 .domain-list li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-add { display: flex; gap: 8px; margin-top: 8px; }
+.notify-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .spinner {
   width: 18px; height: 18px; border-radius: 50%;
   border: 2px solid var(--border-strong); border-top-color: var(--accent);

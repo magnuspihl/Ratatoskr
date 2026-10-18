@@ -4,7 +4,8 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 
 - **Thin client.** Your IMAP/SMTP servers stay the source of truth. Ratatoskr has no local mail
   store, no message cache and no sync engine. The only state it keeps is users, their encrypted
-  account settings and preferences, in one SQLite file.
+  account settings and preferences (plus, for notifications, push subscriptions and the newest
+  INBOX UID already notified about), in one SQLite file.
 - **One container.** Configured by environment variables, with a volume for the SQLite file. No
   Redis, no Postgres, no sidecars.
 - **Modern UI.** Clean three-pane layout, first-class dark mode, usable on a phone.
@@ -37,6 +38,8 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 - Dark mode that follows the system, with a manual override. Simple HTML and plain-text mail get
   dark styling. Heavily designed mail (newsletters) is shown on a light "paper" card instead of
   being force-inverted, with a per-message toggle.
+- Notifications for new mail on phones and desktops (Web Push), and an unread badge on the app
+  icon. Install Ratatoskr as an app (PWA) from the browser; see [Notifications](#notifications).
 - Keyboard shortcuts: `j`/`k` to move, `r` reply, `a` reply all, `f` forward, `e` archive,
   `#` delete, `s` flag, `u` mark unread, `c` compose, `Ctrl/Cmd+Enter` to send.
 
@@ -79,9 +82,45 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | `RATATOSKR_IMAP_IDLE_TIMEOUT` | no | `300` | Seconds before an unused pooled IMAP connection is closed. |
 | `RATATOSKR_MAX_MESSAGE_MB` | no | `50` | Largest message the server downloads for display. |
 | `RATATOSKR_MAX_UPLOAD_MB` | no | `25` | Largest total attachment upload when composing. |
+| `RATATOSKR_VAPID_SUBJECT` | no | `RATATOSKR_BASE_URL` if it is `https://`, else `mailto:postmaster@<host>` | Contact sent to push services (Apple, Google, Mozilla) with every notification: a `mailto:` or `https:` URL. |
 | `LOG_LEVEL` | no | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 | `RATATOSKR_DEV_LOGIN` | no | `false` | Development only: log in as a local dev user without OIDC. Ignored when `NODE_ENV=production` (always set in the image). |
 | `RATATOSKR_DEV_ALLOWED_HOST_SUFFIX` | no | – | Development only: also serve the dev server on any host ending in this suffix (see [Development](#development)). Ignored when `NODE_ENV=production` and by the production build. |
+
+### Notifications
+
+Ratatoskr is an installable web app (PWA) and can send notifications for new mail through the
+browsers' standard Web Push services. No native app, no Firebase or Apple developer account and
+no extra configuration are needed. The push keys (VAPID) are derived from
+`RATATOSKR_SECRET_KEY`. HTTPS is required.
+
+Each user turns notifications on per device in **Settings → Notifications**:
+
+- **Android** (Chrome, Firefox, Edge, Samsung Internet) and **desktop browsers**: turn the switch on.
+  Installing the app ("Add to Home screen" / "Install app") is optional.
+- **iPhone and iPad** (iOS/iPadOS 16.4 or newer): open the site in Safari, tap *Share → Add to
+  Home Screen*, open Ratatoskr from the Home Screen, then turn the switch on. A Safari tab can't
+  receive notifications.
+
+What you get:
+
+- One notification per new **unread** message in any account's INBOX (several messages that
+  arrive together are summarised in one). Tapping it opens the message.
+- Nothing while the app is open and focused on any of your devices, since the list updates live
+  anyway.
+- Users choose whether notifications show **sender and subject** or only "New message" and the
+  account name. The payload is end-to-end encrypted to the device (RFC 8291), but it does pass
+  through Apple's, Google's or Mozilla's push service.
+- The app icon shows the number of unread messages across all inboxes, where the platform
+  supports badges.
+
+How it works: while a user has notifications on at least one device, the server keeps one IMAP
+IDLE connection per account open on INBOX, even when no browser is open. Mind your provider's
+connection limits (Gmail allows 15 simultaneous IMAP connections per account). The server
+remembers the newest INBOX UID it has notified about, so after a restart it reports mail that
+arrived while it was down, but never old mail when notifications are switched on. Subscriptions
+that the push service reports as expired are removed automatically. Signing out stops
+notifications on that device.
 
 ### OIDC setup
 
@@ -164,6 +203,11 @@ Every message is assumed to be hostile.
 - **Credentials:** AES-256-GCM with a random IV, and the ciphertext bound to its user and account
   (AAD), so a copied database row doesn't decrypt elsewhere. Passwords are never returned by the
   API.
+- **Notifications:** push subscription endpoints come from the browser, so the server only
+  accepts and POSTs to the known browser push services (`fcm.googleapis.com`,
+  `*.push.apple.com`, `*.push.services.mozilla.com`, `*.notify.windows.com`, ...) over HTTPS,
+  never to arbitrary URLs. Payloads are encrypted for the receiving device. The service worker
+  only shows notifications. It caches nothing and only opens paths of the app itself.
 - **Sessions** are encrypted, HttpOnly, SameSite=Lax cookies. State-changing API calls also
   require a custom header, which cross-site pages can't send. WebSocket upgrades check
   `Origin`.
@@ -194,7 +238,7 @@ logins always return to that one host.
 | Command | What it does |
 | --- | --- |
 | `npm run typecheck` | Type-check server and web client. |
-| `npm test` | Unit tests: sanitizer (hostile fixtures), MIME parsing, credential encryption, SSRF guards, unified-inbox merging. |
+| `npm test` | Unit tests: sanitizer (hostile fixtures), MIME parsing, credential encryption, SSRF guards, unified-inbox merging, Web Push encryption (RFC 8291 test vector) and notifications. |
 | `npm run test:integration` | Starts a throwaway [GreenMail](https://greenmail-mail-test.github.io/greenmail/) container (Docker), runs the full HTTP API against real IMAP/SMTP, and removes the container. |
 | `npm run build` | Compiles the server to `dist/server` and the web client to `dist/web`. |
 | `npm start` | Runs the production build. |

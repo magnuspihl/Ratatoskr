@@ -1,8 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
-import { useState } from 'react';
-import type { DomainName, Preferences, SwipeAction } from '../../../shared/types';
+import { useEffect, useState } from 'react';
+import type { DomainName, NotificationContent, Preferences, SwipeAction } from '../../../shared/types';
 import { api } from '../api';
+import { currentEnvironment, currentSubscription, disablePush, enablePush, pushAvailability, type PushAvailability } from '../push';
 
 const SWIPE_OPTIONS: [SwipeAction, string][] = [
   ['none', 'Nothing'],
@@ -76,6 +77,7 @@ export function SettingsDialog({ prefs, onClose }: { prefs: Preferences; onClose
             <input type="checkbox" checked={v.markReadOnOpen} onChange={(e) => void save({ ...v, markReadOnOpen: e.target.checked })} />
             Mark messages as read when opened
           </label>
+          <Notifications prefs={v} save={save} />
           <ImageDomains />
           {error && <div className="error-text">{error}</div>}
         </div>
@@ -142,6 +144,102 @@ function ImageDomains() {
       </form>
       <div className="hint">Also covers subdomains. Not applied to messages that fail the sender check (DMARC).</div>
       {(error || domains.error) && <div className="error-text">{error ?? (domains.error as Error).message}</div>}
+    </div>
+  );
+}
+
+/** Web Push on this device, plus how much the notifications may reveal (a per-user preference). */
+function Notifications({ prefs, save }: { prefs: Preferences; save: (p: Preferences) => Promise<void> }) {
+  const [availability, setAvailability] = useState<PushAvailability>(() => pushAvailability(currentEnvironment()));
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (availability !== 'available') return setEnabled(false);
+    void currentSubscription()
+      .then((sub) => setEnabled(!!sub && Notification.permission === 'granted'))
+      .catch(() => setEnabled(false));
+  }, [availability]);
+
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    setInfo(null);
+    try {
+      await fn();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+      setAvailability(pushAvailability(currentEnvironment()));
+    }
+  };
+
+  const toggle = (on: boolean) =>
+    run(async () => {
+      if (on) await enablePush();
+      else await disablePush();
+      setEnabled(on);
+    });
+
+  const test = () =>
+    run(async () => {
+      const { delivered } = await api.testPush();
+      setInfo(delivered > 0 ? `Sent to ${delivered} device${delivered === 1 ? '' : 's'}.` : 'No device accepted the notification.');
+    });
+
+  return (
+    <div>
+      <label className="label">Notifications</label>
+      {availability === 'needs-install' && (
+        <div className="hint">
+          On iPhone and iPad, notifications only work once Ratatoskr is on your Home Screen. Tap the Share button, choose
+          “Add to Home Screen”, then open Ratatoskr from there and come back here.
+        </div>
+      )}
+      {availability === 'denied' && (
+        <div className="hint">Notifications are blocked for this site. Allow them in your browser’s site settings, then reopen this dialog.</div>
+      )}
+      {availability === 'unsupported' && (
+        <div className="hint">
+          {window.isSecureContext ? 'This browser does not support notifications.' : 'Notifications need the app to be served over HTTPS.'}
+        </div>
+      )}
+      {availability === 'available' && (
+        <div className="notify-row">
+          <label className="check">
+            <input type="checkbox" checked={!!enabled} disabled={busy || enabled === null} onChange={(e) => void toggle(e.target.checked)} />
+            Notify me about new mail on this device
+          </label>
+          {enabled && (
+            <button className="btn" disabled={busy} onClick={() => void test()}>
+              Send test
+            </button>
+          )}
+        </div>
+      )}
+      <div style={{ marginTop: 10 }}>
+        <label className="label" htmlFor="notify-content">
+          Show in notifications
+        </label>
+        <select
+          id="notify-content"
+          className="select"
+          value={prefs.notificationContent}
+          onChange={(e) => void save({ ...prefs, notificationContent: e.target.value as NotificationContent })}
+        >
+          <option value="full">Sender and subject</option>
+          <option value="minimal">Only “New message” and the account</option>
+        </select>
+      </div>
+      <div className="hint">
+        You get a notification for new unread mail in your inboxes while Ratatoskr isn’t open in front of you. Notifications pass through
+        Apple’s or Google’s push service, encrypted so that only your device can read them.
+      </div>
+      {info && <div className="hint">{info}</div>}
+      {error && <div className="error-text">{error}</div>}
     </div>
   );
 }

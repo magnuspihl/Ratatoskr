@@ -8,6 +8,8 @@ import crypto from 'node:crypto';
 export class Keyring {
   readonly credentialKey: Buffer;
   readonly sessionKey: Buffer;
+  /** P-256 private scalar for Web Push (VAPID). Derived, so no extra key needs configuring. */
+  readonly vapidSeed: Buffer;
 
   constructor(masterSecret: string) {
     if (masterSecret.length < 32) throw new Error('Master secret must be at least 32 characters');
@@ -16,6 +18,7 @@ export class Keyring {
       Buffer.from(crypto.hkdfSync('sha256', ikm, Buffer.from('ratatoskr'), Buffer.from(info), 32));
     this.credentialKey = derive('account-credentials-v1');
     this.sessionKey = derive('session-cookie-v1');
+    this.vapidSeed = derive('web-push-vapid-v1');
   }
 }
 

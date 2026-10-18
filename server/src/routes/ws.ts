@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { WebSocket } from 'ws';
 import { isDevHostAllowed } from '../../../shared/devHosts.js';
-import type { ServerEvent } from '../../../shared/types.js';
+import type { ClientEvent, ServerEvent } from '../../../shared/types.js';
 import type { Config } from '../config.js';
 import type { Store } from '../db.js';
 import type { ImapPool } from '../imap/pool.js';
@@ -41,12 +41,37 @@ export function isWsOriginAllowed(
   );
 }
 
+/** Parses a message from the browser; anything unexpected is ignored. */
+export function parseClientEvent(data: unknown): ClientEvent | null {
+  try {
+    const ev = JSON.parse(String(data)) as Partial<ClientEvent>;
+    if (ev?.type === 'presence' && typeof ev.active === 'boolean') return { type: 'presence', active: ev.active };
+  } catch {
+    /* not JSON */
+  }
+  return null;
+}
+
+export interface LiveSessions {
+  /** True if any of the user's browser sessions is visible and focused right now. */
+  isUserActive: (userId: string) => boolean;
+}
+
 /**
  * One WebSocket per browser session. While at least one is open for a user, the pool keeps an IDLE
  * connection per account on INBOX and forwards change notifications; the browser then re-fetches.
+ * The browser reports whether it is in front of the user, so phone notifications can be skipped
+ * while the app is being looked at.
  */
-export async function registerWebSocket(app: FastifyInstance, config: Config, store: Store, sessions: Sessions, pool: ImapPool) {
+export async function registerWebSocket(
+  app: FastifyInstance,
+  config: Config,
+  store: Store,
+  sessions: Sessions,
+  pool: ImapPool,
+): Promise<LiveSessions> {
   const sockets = new Map<string, Set<WebSocket>>();
+  const active = new WeakSet<WebSocket>();
 
   pool.onEvent = (userId: string, event: ServerEvent) => {
     const payload = JSON.stringify(event);
@@ -78,7 +103,14 @@ export async function registerWebSocket(app: FastifyInstance, config: Config, st
       if (set.size === 0) sockets.delete(user.id);
       pool.unwatch(user.id);
     });
-    // The client never needs to send anything; ignore input.
-    socket.on('message', () => {});
+    socket.on('message', (data) => {
+      const ev = parseClientEvent(data);
+      if (ev?.active) active.add(socket);
+      else if (ev) active.delete(socket);
+    });
   });
+
+  return {
+    isUserActive: (userId) => [...(sockets.get(userId) ?? [])].some((ws) => ws.readyState === ws.OPEN && active.has(ws)),
+  };
 }

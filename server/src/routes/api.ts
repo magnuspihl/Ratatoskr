@@ -10,6 +10,7 @@ import { RemoteImageCache, type RemoteImage } from '../net/remoteImages.js';
 import { displayDomain, MAX_ALLOWED_DOMAINS, normaliseDomain } from '../mail/imageAllowlist.js';
 import type { Sessions } from '../auth/session.js';
 import { ComposeError, type ComposeService } from '../mail/send.js';
+import { PushSubscriptionError, validateSubscription, type PushService } from '../push/service.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -65,6 +66,12 @@ const prefsSchema = z.object({
   markReadOnOpen: z.boolean(),
   swipeLeft: swipe,
   swipeRight: swipe,
+  notificationContent: z.enum(['full', 'minimal']).default('full'),
+});
+
+const pushSubscriptionSchema = z.object({
+  endpoint: z.string().max(2000),
+  keys: z.object({ p256dh: z.string().max(200), auth: z.string().max(100) }),
 });
 
 const composeSchema = z.object({
@@ -89,7 +96,7 @@ function sendError(reply: FastifyReply, err: unknown) {
   }
   if (err instanceof NotFoundError || err instanceof MessageGoneError) return reply.code(404).send({ error: err.message });
   if (err instanceof StaleError) return reply.code(409).send({ error: err.message, stale: true });
-  if (err instanceof ComposeError) return reply.code(400).send({ error: err.message });
+  if (err instanceof ComposeError || err instanceof PushSubscriptionError) return reply.code(400).send({ error: err.message });
   if (err instanceof MailServerError) return reply.code(502).send({ error: err.message });
   reply.log.error({ err }, 'request failed');
   return reply.code(500).send({ error: 'Internal error' });
@@ -107,12 +114,15 @@ export interface ApiDeps {
   pool: ImapPool;
   mail: MailService;
   compose: ComposeService;
+  push: PushService;
+  /** VAPID public key, the browser's applicationServerKey. */
+  vapidPublicKey: string;
   /** Replaces the real remote image fetcher (tests only). */
   fetchImage?: (url: string) => Promise<RemoteImage>;
 }
 
 export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
-  const { config, store, sessions, pool, mail, compose, fetchImage } = deps;
+  const { config, store, sessions, pool, mail, compose, push, vapidPublicKey, fetchImage } = deps;
 
   app.decorateRequest('user', null);
 
@@ -154,6 +164,35 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       return sendError(reply, err);
     }
   });
+
+  // ---- Web Push (phone notifications) -------------------------------------------
+
+  app.get('/api/push', async () => ({ publicKey: vapidPublicKey }));
+
+  app.post('/api/push/subscriptions', async (req, reply) => {
+    try {
+      const sub = pushSubscriptionSchema.parse(req.body);
+      validateSubscription(sub);
+      store.addPushSubscription(uid(req), sub);
+      pool.setBackground(uid(req), true, true);
+      return { ok: true };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.delete('/api/push/subscriptions', async (req, reply) => {
+    try {
+      const { endpoint } = z.object({ endpoint: z.string().max(2000) }).parse(req.body);
+      store.removePushSubscription(uid(req), endpoint);
+      if (store.listPushSubscriptions(uid(req)).length === 0) pool.setBackground(uid(req), false);
+      return { ok: true };
+    } catch (err) {
+      return sendError(reply, err);
+    }
+  });
+
+  app.post('/api/push/test', async (req) => ({ delivered: await push.sendTest(uid(req)) }));
 
   // ---- sender domains allowed to show images ----------------------------------
 

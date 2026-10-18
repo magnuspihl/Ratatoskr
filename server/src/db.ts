@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { AccountInput, AccountView, Preferences, TlsMode } from '../../shared/types.js';
+import type { AccountInput, AccountView, Preferences, PushSubscriptionInput, TlsMode } from '../../shared/types.js';
 import { decrypt, encrypt } from './crypto.js';
 
 const MIGRATIONS: string[] = [
@@ -46,7 +46,25 @@ const MIGRATIONS: string[] = [
      created_at INTEGER NOT NULL,
      PRIMARY KEY (user_id, domain)
    );`,
+  // Web Push: one row per browser/device. The endpoint is unique, so a device that is used by a
+  // different user after a re-login moves to that user instead of receiving both users' mail.
+  `CREATE TABLE push_subscriptions (
+     endpoint TEXT PRIMARY KEY,
+     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+     p256dh TEXT NOT NULL,
+     auth TEXT NOT NULL,
+     created_at INTEGER NOT NULL
+   );
+   CREATE INDEX push_subscriptions_user ON push_subscriptions(user_id);
+   CREATE TABLE inbox_state (
+     account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+     uid_validity TEXT NOT NULL,
+     last_uid INTEGER NOT NULL
+   );`,
 ];
+
+/** Most devices one user can have notifications on; the oldest subscription is dropped beyond that. */
+export const MAX_PUSH_SUBSCRIPTIONS = 20;
 
 export const DEFAULT_PREFERENCES: Preferences = {
   theme: 'system',
@@ -54,6 +72,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   markReadOnOpen: true,
   swipeLeft: 'delete',
   swipeRight: 'archive',
+  notificationContent: 'full',
 };
 
 export interface User {
@@ -111,7 +130,8 @@ function toView(r: AccountRow): AccountView {
 
 /**
  * Persistence for the only state Ratatoskr keeps: users, their (encrypted) account settings,
- * preferences, recently used recipients and sender domains allowed to show images. No mail content is ever stored.
+ * preferences, recently used recipients, sender domains allowed to show images, Web Push
+ * subscriptions and the highest INBOX UID already notified about. No mail content is ever stored.
  *
  * Every account query is scoped by user id; there is deliberately no "get account by id" without
  * an owner, which keeps per-user isolation enforced at the data layer.
@@ -345,5 +365,66 @@ export class Store {
 
   removeImageDomain(userId: string, domain: string): boolean {
     return this.db.prepare('DELETE FROM image_domains WHERE user_id = ? AND domain = ?').run(userId, domain).changes > 0;
+  }
+
+  // ---- Web Push subscriptions ------------------------------------------------
+
+  addPushSubscription(userId: string, sub: PushSubscriptionInput) {
+    this.db
+      .prepare(
+        `INSERT INTO push_subscriptions (endpoint, user_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh,
+           auth = excluded.auth, created_at = excluded.created_at`,
+      )
+      .run(sub.endpoint, userId, sub.keys.p256dh, sub.keys.auth, Date.now());
+    this.db
+      .prepare(
+        `DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint NOT IN (
+           SELECT endpoint FROM push_subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?)`,
+      )
+      .run(userId, userId, MAX_PUSH_SUBSCRIPTIONS);
+  }
+
+  listPushSubscriptions(userId: string): PushSubscriptionInput[] {
+    const rows = this.db
+      .prepare('SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ? ORDER BY created_at')
+      .all(userId) as { endpoint: string; p256dh: string; auth: string }[];
+    return rows.map((r) => ({ endpoint: r.endpoint, keys: { p256dh: r.p256dh, auth: r.auth } }));
+  }
+
+  removePushSubscription(userId: string, endpoint: string): boolean {
+    return this.db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?').run(userId, endpoint).changes > 0;
+  }
+
+  /** Users with notifications enabled on at least one device. */
+  pushUserIds(): string[] {
+    return (this.db.prepare('SELECT DISTINCT user_id FROM push_subscriptions').all() as { user_id: string }[]).map((r) => r.user_id);
+  }
+
+  // ---- highest INBOX UID already notified about (per account) ---------------------
+
+  getInboxState(userId: string, accountId: string): { uidValidity: string; lastUid: number } | null {
+    const row = this.db
+      .prepare(
+        `SELECT s.uid_validity, s.last_uid FROM inbox_state s JOIN accounts a ON a.id = s.account_id
+         WHERE a.user_id = ? AND a.id = ?`,
+      )
+      .get(userId, accountId) as { uid_validity: string; last_uid: number } | undefined;
+    return row ? { uidValidity: row.uid_validity, lastUid: row.last_uid } : null;
+  }
+
+  /** Forget every mark of a user, so new-mail tracking starts over from "now". */
+  clearInboxState(userId: string) {
+    this.db.prepare('DELETE FROM inbox_state WHERE account_id IN (SELECT id FROM accounts WHERE user_id = ?)').run(userId);
+  }
+
+  setInboxState(userId: string, accountId: string, uidValidity: string, lastUid: number) {
+    this.db
+      .prepare(
+        `INSERT INTO inbox_state (account_id, uid_validity, last_uid)
+         SELECT id, ?, ? FROM accounts WHERE user_id = ? AND id = ?
+         ON CONFLICT (account_id) DO UPDATE SET uid_validity = excluded.uid_validity, last_uid = excluded.last_uid`,
+      )
+      .run(uidValidity, lastUid, userId, accountId);
   }
 }

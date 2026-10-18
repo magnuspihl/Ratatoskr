@@ -12,6 +12,7 @@ import type {
   MessageDetail,
   MessageRef,
   Preferences,
+  PushSubscriptionInput,
   SendResult,
 } from '../../shared/types';
 
@@ -95,6 +96,11 @@ export const api = {
   imageDomains: () => request<DomainName[]>('GET', '/api/image-domains'),
   addImageDomain: (domain: string) => request<DomainName[]>('POST', '/api/image-domains', { domain }),
   removeImageDomain: (domain: string) => request<DomainName[]>('DELETE', `/api/image-domains/${encodeURIComponent(domain)}`),
+
+  pushKey: () => request<{ publicKey: string }>('GET', '/api/push'),
+  addPushSubscription: (sub: PushSubscriptionInput) => request<{ ok: true }>('POST', '/api/push/subscriptions', sub),
+  removePushSubscription: (endpoint: string) => request<{ ok: true }>('DELETE', '/api/push/subscriptions', { endpoint }),
+  testPush: () => request<{ delivered: number }>('POST', '/api/push/test'),
 
   recipients: (q: string) => request<{ name: string; address: string }[]>('GET', `/api/recipients?q=${encodeURIComponent(q)}`),
 };
