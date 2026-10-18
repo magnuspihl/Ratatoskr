@@ -1,26 +1,11 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
-import type { AccountInput, AccountView, TlsMode } from '../../../shared/types';
+import { DEFAULT_PORTS } from '../../../shared/mailPorts';
+import type { AccountDefaults, AccountInput, AccountView, TlsMode } from '../../../shared/types';
+import { newAccountInput, usesDefaultPassword } from '../accountForm';
 import { api } from '../api';
 import { ACCOUNT_COLORS } from '../util';
-
-const DEFAULT_PORTS: Record<'imap' | 'smtp', Record<TlsMode, number>> = {
-  imap: { tls: 993, starttls: 143, none: 143 },
-  smtp: { tls: 465, starttls: 587, none: 25 },
-};
-
-function emptyInput(n: number): AccountInput {
-  return {
-    name: '',
-    displayName: '',
-    email: '',
-    color: ACCOUNT_COLORS[n % ACCOUNT_COLORS.length]!,
-    imap: { host: '', port: 993, tls: 'tls', user: '', password: '' },
-    smtp: { host: '', port: 465, tls: 'tls', user: '', password: '' },
-    appendSent: true,
-  };
-}
 
 function fromView(a: AccountView): AccountInput {
   return {
@@ -34,7 +19,20 @@ function fromView(a: AccountView): AccountInput {
   };
 }
 
-function ServerFields({ kind, value, onChange, editing }: { kind: 'imap' | 'smtp'; value: AccountInput['imap']; onChange: (v: AccountInput['imap']) => void; editing: boolean }) {
+function ServerFields({
+  kind,
+  value,
+  onChange,
+  editing,
+  passwordHint,
+}: {
+  kind: 'imap' | 'smtp';
+  value: AccountInput['imap'];
+  onChange: (v: AccountInput['imap']) => void;
+  editing: boolean;
+  /** Placeholder for a blank password on a new account. */
+  passwordHint: string;
+}) {
   return (
     <fieldset>
       <legend>{kind === 'imap' ? 'Incoming (IMAP)' : 'Outgoing (SMTP)'}</legend>
@@ -75,7 +73,7 @@ function ServerFields({ kind, value, onChange, editing }: { kind: 'imap' | 'smtp
             type="password"
             value={value.password ?? ''}
             autoComplete="new-password"
-            placeholder={editing ? 'Unchanged' : kind === 'smtp' ? 'Same as IMAP' : ''}
+            placeholder={editing ? 'Unchanged' : passwordHint}
             onChange={(e) => onChange({ ...value, password: e.target.value })}
           />
         </div>
@@ -85,7 +83,19 @@ function ServerFields({ kind, value, onChange, editing }: { kind: 'imap' | 'smtp
   );
 }
 
-function AccountForm({ initial, id, onDone, onCancel }: { initial: AccountInput; id?: string; onDone: () => void; onCancel: () => void }) {
+function AccountForm({
+  initial,
+  id,
+  defaults,
+  onDone,
+  onCancel,
+}: {
+  initial: AccountInput;
+  id?: string;
+  defaults: AccountDefaults;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
   const [v, setV] = useState(initial);
   const [busy, setBusy] = useState<string | null>(null);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
@@ -113,6 +123,11 @@ function AccountForm({ initial, id, onDone, onCancel }: { initial: AccountInput;
       setBusy(null);
     }
   };
+
+  const defaultPw = (kind: 'imap' | 'smtp') => usesDefaultPassword(defaults, kind, v[kind].host);
+  const imapHint = defaultPw('imap') ? 'Default password' : '';
+  // The default password is never sent to a non-default SMTP server, not even via "Same as IMAP".
+  const smtpHint = v.imap.password ? 'Same as IMAP' : defaultPw('smtp') ? 'Default password' : defaultPw('imap') ? '' : 'Same as IMAP';
 
   const setEmail = (email: string) => {
     // Fill obvious defaults while the user types the address.
@@ -152,8 +167,8 @@ function AccountForm({ initial, id, onDone, onCancel }: { initial: AccountInput;
             </div>
           </div>
         </div>
-        <ServerFields kind="imap" value={v.imap} editing={!!id} onChange={(imap) => setV({ ...v, imap })} />
-        <ServerFields kind="smtp" value={v.smtp} editing={!!id} onChange={(smtp) => setV({ ...v, smtp })} />
+        <ServerFields kind="imap" value={v.imap} editing={!!id} passwordHint={imapHint} onChange={(imap) => setV({ ...v, imap })} />
+        <ServerFields kind="smtp" value={v.smtp} editing={!!id} passwordHint={smtpHint} onChange={(smtp) => setV({ ...v, smtp })} />
         <label className="check">
           <input type="checkbox" checked={v.appendSent} onChange={(e) => setV({ ...v, appendSent: e.target.checked })} />
           Save a copy of sent mail to the Sent folder
@@ -178,10 +193,20 @@ function AccountForm({ initial, id, onDone, onCancel }: { initial: AccountInput;
   );
 }
 
-export function AccountsDialog({ accounts, onClose, startWithNew }: { accounts: AccountView[]; onClose: () => void; startWithNew?: boolean }) {
+export function AccountsDialog({
+  accounts,
+  defaults,
+  onClose,
+  startWithNew,
+}: {
+  accounts: AccountView[];
+  defaults: AccountDefaults;
+  onClose: () => void;
+  startWithNew?: boolean;
+}) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<{ id?: string; input: AccountInput } | null>(
-    startWithNew ? { input: emptyInput(accounts.length) } : null,
+    startWithNew ? { input: newAccountInput(accounts.length, defaults) } : null,
   );
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ['accounts'] });
@@ -202,6 +227,7 @@ export function AccountsDialog({ accounts, onClose, startWithNew }: { accounts: 
           <AccountForm
             initial={editing.input}
             id={editing.id}
+            defaults={defaults}
             onCancel={() => (accounts.length ? setEditing(null) : onClose())}
             onDone={() => {
               refresh();
@@ -240,7 +266,7 @@ export function AccountsDialog({ accounts, onClose, startWithNew }: { accounts: 
             </div>
             <div className="dialog-foot">
               <span className="grow muted">Passwords are stored encrypted and never sent back to the browser.</span>
-              <button className="btn primary" onClick={() => setEditing({ input: emptyInput(accounts.length) })}>
+              <button className="btn primary" onClick={() => setEditing({ input: newAccountInput(accounts.length, defaults) })}>
                 <Plus size={15} /> Add account
               </button>
             </div>

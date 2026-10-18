@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { AccountInput, ActionResult, ComposePayload, Me, MessageRef } from '../../../shared/types.js';
+import { accountDefaultsFor, withDefaultPassword, type TemplateValues } from '../accountDefaults.js';
 import type { Config } from '../config.js';
 import type { Store, User } from '../db.js';
 import { MailServerError, testConnection } from '../imap/connect.js';
@@ -148,6 +149,13 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
   });
 
   const uid = (req: FastifyRequest) => req.user!.id;
+  /** Values for {username}, {email} and {name} in the admin's default account settings. */
+  const templateValues = (u: User): TemplateValues => ({
+    // OIDC providers don't always send a preferred_username; the email's local part is the next best thing.
+    username: u.username || (u.email.includes('@') ? u.email.slice(0, u.email.lastIndexOf('@')) : ''),
+    email: u.email,
+    name: u.name,
+  });
   const ownsAccount = (userId: string, accountId: string) => store.listAccounts(userId).some((a) => a.id === accountId);
   const requireAccount = (userId: string, accountId: string) => {
     if (!ownsAccount(userId, accountId)) throw new NotFoundError('Account not found');
@@ -170,7 +178,14 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
 
   app.get('/api/me', async (req): Promise<Me> => {
     const u = req.user!;
-    return { id: u.id, name: u.name, email: u.email, preferences: u.preferences, hasPassword: u.hasPassword };
+    return {
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      preferences: u.preferences,
+      hasPassword: u.hasPassword,
+      accountDefaults: accountDefaultsFor(config.accountDefaults, templateValues(u)),
+    };
   });
 
   const passwordChangeSchema = z.object({ current: z.string().max(1000), next: passwordSchema });
@@ -284,7 +299,8 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
     try {
       const body = z.object({ account: accountSchema, id: z.string().optional() }).parse(req.body);
       const existing = body.id ? store.getAccountSecret(uid(req), body.id) : null;
-      await verify(body.account, existing ? { imap: existing.imap.password, smtp: existing.smtp.password } : undefined);
+      if (existing) await verify(body.account, { imap: existing.imap.password, smtp: existing.smtp.password });
+      else await verify(withDefaultPassword(config.accountDefaults, templateValues(req.user!), body.account));
       return { ok: true };
     } catch (err) {
       return sendError(reply, err);
@@ -293,7 +309,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
 
   app.post('/api/accounts', async (req, reply) => {
     try {
-      const input = accountSchema.parse(req.body);
+      const input = withDefaultPassword(config.accountDefaults, templateValues(req.user!), accountSchema.parse(req.body));
       if (!input.imap.password) throw new ComposeError('IMAP password is required');
       await verify(input);
       const account = store.createAccount(uid(req), input);

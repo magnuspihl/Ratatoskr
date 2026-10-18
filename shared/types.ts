@@ -24,6 +24,23 @@ export interface AccountView {
   appendSent: boolean;
 }
 
+/**
+ * What the "Add account" form starts with for this user: the admin's defaults with tokens such as
+ * {username} already filled in. Fields without a default are empty.
+ */
+export interface AccountDefaults {
+  name: string;
+  displayName: string;
+  email: string;
+  imap: { host: string; port: number; tls: TlsMode; user: string };
+  smtp: { host: string; port: number; tls: TlsMode; user: string };
+  /**
+   * The admin set a default password. It never reaches the browser: a blank password on a new
+   * account is replaced by it on the server, but only while the server is the default one.
+   */
+  password: boolean;
+}
+
 export type SpecialUse = 'inbox' | 'sent' | 'drafts' | 'trash' | 'archive' | 'junk' | 'all' | 'flagged' | 'snoozed';
 
 export interface FolderView {
@@ -230,6 +247,8 @@ export interface Me {
   preferences: Preferences;
   /** Signs in with a username and password, so can change it in Settings. */
   hasPassword: boolean;
+  /** Starting values for a new mail account. */
+  accountDefaults: AccountDefaults;
 }
 
 /** Login options shown on the sign-in page (GET /auth/methods). */
