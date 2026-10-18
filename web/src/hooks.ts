@@ -37,6 +37,7 @@ export function useMessageCache() {
               pages: data.pages.map((p) => ({
                 ...p,
                 messages: p.messages.map(fn).filter((m): m is MessageSummary => m !== null),
+                related: (p.related ?? []).map(fn).filter((m): m is MessageSummary => m !== null),
               })),
             }
           : data,
@@ -62,7 +63,7 @@ export function useMessageAction(onError: (msg: string) => void) {
       // Previous flag values, so read/flag changes can be undone exactly.
       const before = new Map<string, MessageSummary>();
       for (const [, data] of qc.getQueriesData<MessagesData>({ queryKey: ['messages'] })) {
-        for (const p of data?.pages ?? []) for (const m of p.messages) if (hit(m)) before.set(refKey(m), m);
+        for (const p of data?.pages ?? []) for (const m of [...p.messages, ...(p.related ?? [])]) if (hit(m)) before.set(refKey(m), m);
       }
 
       if (action.type === 'seen' || action.type === 'flagged') {

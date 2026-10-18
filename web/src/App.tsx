@@ -1,13 +1,14 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../shared/types';
+import { groupConversations, rowOf } from '../../shared/threads';
 import { inboxUnread } from '../../shared/unread';
 import { api, ApiError, type MailboxSel } from './api';
 import { AccountsDialog } from './components/AccountsDialog';
 import { Composer, type ComposerInit } from './components/Composer';
 import { Login } from './components/Login';
 import { MessageList } from './components/MessageList';
-import { quotableDetail, Reader, type ReplyKind } from './components/Reader';
+import { quotableDetail, Reader, replyTarget, type ReplyKind } from './components/Reader';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
 import { SquirrelRun, type Run } from './components/SquirrelRun';
@@ -128,6 +129,29 @@ export function App() {
   }, [currentView, messages]);
   const listErrors = messagesQ.data?.pages.at(-1)?.errors ?? [];
 
+  const currentFolders = effectiveSel.accountId ? folders.data?.find((f) => f.accountId === effectiveSel.accountId) : undefined;
+  const folderInfo = currentFolders?.folders.find((f) => f.path === effectiveSel.folder);
+  const isSentLike = folderInfo?.specialUse === 'sent' || folderInfo?.specialUse === 'drafts';
+  const inSnoozed = folderInfo?.specialUse === 'snoozed';
+  const inDrafts = folderInfo?.specialUse === 'drafts';
+
+  // One row per conversation, Gmail-style, including your replies found in Sent.
+  const related = useMemo(() => messagesQ.data?.pages.flatMap((p) => p.related ?? []) ?? [], [messagesQ.data]);
+  const rows = useMemo(() => groupConversations(messages, related, { group: !inDrafts }), [messages, related, inDrafts]);
+  /** Actions on a conversation apply to all of its messages in the listed folder. */
+  const expand = useCallback(
+    (refs: MessageRef[]) => {
+      const out = new Map<string, MessageRef>();
+      for (const r of refs) {
+        const row = rowOf(rows, r);
+        const list = row && row.members.some((m) => refKey(m) === refKey(r)) ? row.members.map(toRef) : [r];
+        for (const m of list) out.set(refKey(m), m);
+      }
+      return [...out.values()];
+    },
+    [rows],
+  );
+
   // A snoozed message is back: say so while the app is open (phones get a notification instead).
   const onSnoozeEnded = useCallback(
     (ev: SnoozeEndedEvent) => {
@@ -181,10 +205,6 @@ export function App() {
   }, [loggedIn, accountsQ.isSuccess, accounts.length, openOverlay]);
 
   const runAction = useMessageAction(useCallback((m: string) => push(m, true), [push]));
-  const currentFolders = effectiveSel.accountId ? folders.data?.find((f) => f.accountId === effectiveSel.accountId) : undefined;
-  const folderInfo = currentFolders?.folders.find((f) => f.path === effectiveSel.folder);
-  const isSentLike = folderInfo?.specialUse === 'sent' || folderInfo?.specialUse === 'drafts';
-  const inSnoozed = folderInfo?.specialUse === 'snoozed';
 
   const title = effectiveSel.accountId
     ? `${folderInfo?.specialUse === 'inbox' ? 'Inbox' : (folderInfo?.name ?? effectiveSel.folder)}${accounts.length > 1 ? ` · ${accountMap.get(effectiveSel.accountId)?.name ?? ''}` : ''}`
@@ -196,13 +216,20 @@ export function App() {
   };
   const setOpenRef = (r: MessageRef | null) => go({ ...route, open: r ? { accountId: r.accountId, uidValidity: r.uidValidity, uid: r.uid } : null }, true);
 
-  /** Move the selection to the neighbour of `ref` (after archive/delete or j/k). */
+  /** Move the selection to the neighbour of `ref`'s row (after archive/delete or j/k). */
+  const rowIndex = useCallback(
+    (ref: MessageRef) => {
+      const row = rowOf(rows, ref);
+      return row ? rows.indexOf(row) : -1;
+    },
+    [rows],
+  );
   const neighbour = useCallback(
     (ref: MessageRef, dir: 1 | -1) => {
-      const i = messages.findIndex((m) => refKey(m) === refKey(ref));
-      return i === -1 ? null : (messages[i + dir] ?? messages[i - dir] ?? null);
+      const i = rowIndex(ref);
+      return i === -1 ? null : (rows[i + dir] ?? rows[i - dir] ?? null);
     },
-    [messages],
+    [rows, rowIndex],
   );
 
   const runUndo = useCallback(
@@ -214,7 +241,8 @@ export function App() {
   );
 
   const act = useCallback(
-    async (refs: MessageRef[], action: MessageAction) => {
+    async (picked: MessageRef[], action: MessageAction) => {
+      const refs = expand(picked);
       // Snoozing again from the Snoozed folder only changes the time; the message stays.
       const removes = removesFromList(action) && !(action.type === 'snooze' && inSnoozed);
       if (removes && open && refs.some((r) => refKey(r) === refKey(open))) {
@@ -229,8 +257,9 @@ export function App() {
       }
       const res = await runAction(refs, action);
       if (!res.ok) return;
-      const n = refs.length;
-      const what = n === 1 ? 'Message' : `${n} messages`;
+      const n = picked.length;
+      const conversations = refs.length > picked.length;
+      const what = n === 1 ? (conversations ? 'Conversation' : 'Message') : `${n} ${conversations ? 'conversations' : 'messages'}`;
       const label =
         action.type === 'archive' ? `${what} archived` : action.type === 'delete' ? (res.result?.permanent ? `${what} deleted permanently` : `${what} moved to Trash`)
           : action.type === 'move' ? `${what} moved to ${action.destination}`
@@ -239,11 +268,11 @@ export function App() {
       for (const f of res.result?.createdFolders ?? []) push(`Created folder "${f}" for ${action.type === 'snooze' ? 'snoozed' : 'archived'} mail.`);
       const undo = res.undo;
       if (label) push(label, false, undo ? { label: 'Undo', run: () => void runUndo(undo) } : undefined);
-      else if (undo && refs.length > 1) push(`${what} updated`, false, { label: 'Undo', run: () => void runUndo(undo) });
+      else if (undo && picked.length > 1) push(`${what} updated`, false, { label: 'Undo', run: () => void runUndo(undo) });
       return undo;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [open, neighbour, runAction, runUndo, route, back, push, inSnoozed],
+    [open, neighbour, expand, runAction, runUndo, route, back, push, inSnoozed],
   );
 
   /** Swipe actions: same as toolbar actions, with an undo toast for read/flag toggles too. */
@@ -310,14 +339,14 @@ export function App() {
       const t = e.target as HTMLElement;
       if (composer || dialog || e.metaKey || e.ctrlKey || e.altKey) return;
       if (t.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName)) return;
-      const cur = open ? messages.find((m) => refKey(m) === refKey(open)) : undefined;
+      const cur = open ? rowOf(rows, open) : undefined;
       switch (e.key) {
         case 'j':
         case 'k': {
-          const next = open ? neighbour(open, e.key === 'j' ? 1 : -1) : messages[0];
-          if (next && (!open || refKey(next) !== refKey(open))) {
-            const idx = messages.indexOf(next);
-            const curIdx = open ? messages.findIndex((m) => refKey(m) === refKey(open)) : -1;
+          const next = open ? neighbour(open, e.key === 'j' ? 1 : -1) : rows[0];
+          if (next && (!open || next !== cur)) {
+            const idx = rows.indexOf(next);
+            const curIdx = open ? rowIndex(open) : -1;
             if (!open || (e.key === 'j' ? idx > curIdx : idx < curIdx)) {
               if (open) setOpenRef(toRef(next));
               else openMessage(next);
@@ -348,7 +377,7 @@ export function App() {
         case 'a':
         case 'f': {
           if (!open) break;
-          const d = qc.getQueryData<MessageDetail>(['message', refKey(open), 'auto']);
+          const d = qc.getQueryData<MessageDetail>(['message', refKey(replyTarget(cur, open)), 'auto']);
           const kind = e.key === 'r' ? 'reply' : e.key === 'a' ? 'replyAll' : 'forward';
           if (d) void quotableDetail(qc, d).then((quoted) => reply(kind, quoted), (err: Error) => push(err.message, true));
           break;
@@ -413,7 +442,7 @@ export function App() {
         isSentLike={isSentLike}
         accounts={accountMap}
         folders={folders.data}
-        messages={messages}
+        messages={rows}
         loading={messagesQ.isLoading && accounts.length > 0}
         fetchingMore={messagesQ.isFetchingNextPage}
         hasMore={!!messagesQ.hasNextPage}
@@ -436,7 +465,7 @@ export function App() {
             return n;
           })
         }
-        onCheckAll={(on) => setChecked(on ? new Set(messages.map(refKey)) : new Set())}
+        onCheckAll={(on) => setChecked(on ? new Set(rows.map(refKey)) : new Set())}
         onLoadMore={() => void messagesQ.fetchNextPage()}
         unreadOnly={route.unread}
         onUnreadOnly={(on) => {
@@ -449,7 +478,7 @@ export function App() {
           void qc.invalidateQueries({ queryKey: ['messages'] });
           void qc.invalidateQueries({ queryKey: ['folders'] });
         }}
-        onBulk={(action) => void act(messages.filter((m) => checked.has(refKey(m))).map(toRef), action)}
+        onBulk={(action) => void act(rows.filter((m) => checked.has(refKey(m))).map(toRef), action)}
         onNav={() => openOverlay('nav')}
         lastOpenKey={lastOpenKey}
         swipeLeft={prefs?.swipeLeft ?? 'none'}
@@ -463,6 +492,7 @@ export function App() {
       />
       <Reader
         openRef={readerRef}
+        conversation={readerRef ? rowOf(rows, readerRef) : undefined}
         account={readerRef ? accountMap.get(readerRef.accountId) : undefined}
         multipleAccounts={accounts.length > 1}
         folders={readerRef ? folders.data?.find((f) => f.accountId === readerRef.accountId) : undefined}

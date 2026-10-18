@@ -1,4 +1,4 @@
-import type { FetchMessageObject, ImapFlow, ListResponse, MessageAddressObject, SearchObject } from 'imapflow';
+import type { FetchMessageObject, FetchQueryObject, ImapFlow, ListResponse, MessageAddressObject, SearchObject } from 'imapflow';
 import type {
   AccountCursor,
   AccountFolders,
@@ -12,12 +12,14 @@ import type {
   SpecialUse,
   UndoInfo,
 } from '../../../shared/types.js';
+import { firstMessageId, type ThreadHeaders } from '../../../shared/threads.js';
 import { decideRemoteImages, displayDomain } from '../mail/imageAllowlist.js';
-import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
+import { attachmentBytes, buildMessageDetail, parseRaw, parseReferences, type ParsedEmail } from '../mail/parse.js';
 import { collectRemoteImageUrls } from '../mail/sanitize.js';
 import { inlineRemoteImages, type InlineOptions, type RemoteImageCache } from '../net/remoteImages.js';
 import { MailServerError, describeError } from './connect.js';
 import type { ImapPool } from './pool.js';
+import { lookupTerms, matchesTerm, RelatedIndex, searchFor, termKey, type LookupTerm } from './related.js';
 import { findTextPart, hasAttachments, SNIPPET_FETCH_BYTES, snippetFromPart, type TextPart } from './snippet.js';
 
 const SPECIAL_USE: Record<string, SpecialUse> = {
@@ -81,6 +83,10 @@ type CursorMap = Record<string, AccountCursor>;
 
 const sourceKey = (s: ListSource) => `${s.accountId}\u0000${s.folder}`;
 
+function fetchedItem(source: ListSource, uidValidity: string, msg: FetchMessageObject): FetchedItem {
+  return { source, uidValidity, msg, sortTime: (toDate(msg.internalDate) ?? toDate(msg.envelope?.date) ?? new Date(0)).getTime() };
+}
+
 export function encodeCursor(c: CursorMap): string {
   return Buffer.from(JSON.stringify(c)).toString('base64url');
 }
@@ -105,6 +111,26 @@ export function decodeCursor(raw: string | undefined | null): CursorMap {
 
 function addresses(list: MessageAddressObject[] | undefined): Address[] {
   return (list ?? []).filter((a) => a.address).map((a) => ({ name: a.name ?? '', address: a.address! }));
+}
+
+/** References kept per message: the root and the most recent ancestors are what threading needs. */
+const MAX_REFERENCES = 30;
+/** Related messages fetched per folder and page. */
+const MAX_RELATED = 200;
+
+const LIST_FETCH: FetchQueryObject = { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true, headers: ['references', 'in-reply-to'] };
+
+/** Message-ID, In-Reply-To and References of a message fetched with LIST_FETCH. */
+export function threadHeaders(msg: Pick<FetchMessageObject, 'envelope' | 'headers'>): ThreadHeaders {
+  // Read from the headers: not every server puts In-Reply-To in the ENVELOPE.
+  const raw = msg.headers?.toString('latin1').replace(/\r?\n[ \t]+/g, ' ') ?? '';
+  let references = parseReferences(raw.match(/^references:(.*)$/im)?.[1]);
+  if (references.length > MAX_REFERENCES) references = [references[0]!, ...references.slice(-(MAX_REFERENCES - 1))];
+  return {
+    messageId: firstMessageId(msg.envelope?.messageId) ?? msg.envelope?.messageId ?? null,
+    inReplyTo: firstMessageId(raw.match(/^in-reply-to:(.*)$/im)?.[1]) ?? firstMessageId(msg.envelope?.inReplyTo),
+    references,
+  };
 }
 
 function toDate(d: Date | string | undefined): Date | null {
@@ -180,6 +206,8 @@ export async function searchWithFallback(client: ImapFlow, attempts: SearchObjec
 }
 
 export class MailService {
+  private readonly relatedIndex = new RelatedIndex();
+
   constructor(private readonly pool: ImapPool) {}
 
   // ---- folders -------------------------------------------------------------
@@ -273,22 +301,84 @@ export class MailService {
         exhausted = start === 1;
       }
 
-      const msgs = await client.fetchAll(
-        range,
-        { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true },
-        { uid: useUid },
-      );
+      const msgs = await client.fetchAll(range, LIST_FETCH, { uid: useUid });
       const items = msgs
         .filter((m) => !cursor || m.uid < cursor.beforeUid)
         .sort((a, b) => b.uid - a.uid)
-        .map((msg) => ({
-          source,
-          uidValidity,
-          msg,
-          sortTime: (toDate(msg.internalDate) ?? toDate(msg.envelope?.date) ?? new Date(0)).getTime(),
-        }));
+        .map((msg) => fetchedItem(source, uidValidity, msg));
       return { source, uidValidity, items, exhausted, reset };
     });
+  }
+
+  /**
+   * Messages in `source` that match any of `terms` (see related.ts). Header searches can be slow
+   * on big folders, so the RelatedIndex remembers results and later only searches new mail.
+   */
+  private async findByTerms(userId: string, source: ListSource, terms: LookupTerm[]): Promise<FetchedItem[]> {
+    return this.pool.withMailbox(userId, source.accountId, source.folder, async (client, selected) => {
+      await client.noop();
+      const mailbox = (client.mailbox || selected) as typeof selected;
+      if (mailbox.exists === 0) return [];
+      const uidValidity = mailbox.uidValidity.toString();
+      const uidNext = Number(mailbox.uidNext);
+      const key = `${userId}\u0000${sourceKey(source)}`;
+      const { searches, known } = this.relatedIndex.plan(key, uidValidity, uidNext, terms);
+      const candidates = new Set(known);
+      const searched = new Set<string>();
+      for (const s of searches) {
+        const res = await client.search(searchFor(s.terms, s.fromUid), { uid: true }).catch(() => false as const);
+        if (!Array.isArray(res)) continue;
+        // "n:*" includes the highest UID even when it is below n.
+        for (const uid of res) if (uid >= s.fromUid) candidates.add(uid);
+        for (const t of s.terms) searched.add(termKey(t));
+      }
+      const uids = [...candidates].sort((a, b) => b - a).slice(0, MAX_RELATED);
+      const msgs = uids.length ? await client.fetchAll(uids.join(','), LIST_FETCH, { uid: true }) : [];
+      const found = msgs.map((msg) => ({ uid: msg.uid, headers: threadHeaders(msg), msg }));
+      this.relatedIndex.record(key, uidValidity, uidNext, terms, searched, found);
+      return found.filter((f) => terms.some((t) => matchesTerm(t, f.headers))).map((f) => fetchedItem(source, uidValidity, f.msg));
+    });
+  }
+
+  /**
+   * The rest of the listed messages' conversations: your replies in the account's Sent folder
+   * (wherever they were sent from) and older messages in the listed folder. Best effort: the
+   * listing never fails because of this. Drafts are not threaded.
+   */
+  private async relatedItems(userId: string, picked: FetchedItem[]): Promise<FetchedItem[]> {
+    const bySource = new Map<string, FetchedItem[]>();
+    for (const it of picked) {
+      const k = sourceKey(it.source);
+      bySource.set(k, [...(bySource.get(k) ?? []), it]);
+    }
+    const listed = new Set(picked.map((it) => `${sourceKey(it.source)}\u0000${it.msg.uid}`));
+    const out = new Map<string, FetchedItem>();
+    await Promise.all(
+      [...bySource.values()].map(async (group) => {
+        const { accountId, folder } = group[0]!.source;
+        try {
+          const [sent, drafts] = await Promise.all([
+            this.specialFolder(userId, accountId, 'sent'),
+            this.specialFolder(userId, accountId, 'drafts'),
+          ]);
+          if (folder === drafts) return;
+          const terms = new Map<string, LookupTerm>();
+          for (const it of group) for (const t of lookupTerms(threadHeaders(it.msg))) terms.set(termKey(t), t);
+          if (terms.size === 0) return;
+          for (const f of new Set([folder, ...(sent ? [sent] : [])])) {
+            const source = { accountId, folder: f };
+            const items = await this.findByTerms(userId, source, [...terms.values()]).catch(() => [] as FetchedItem[]);
+            for (const it of items) {
+              const k = `${sourceKey(source)}\u0000${it.msg.uid}`;
+              if (!listed.has(k)) out.set(k, it);
+            }
+          }
+        } catch {
+          /* threading is best-effort */
+        }
+      }),
+    );
+    return [...out.values()];
   }
 
   private async snippets(userId: string, items: FetchedItem[]): Promise<Map<FetchedItem, string>> {
@@ -345,7 +435,7 @@ export class MailService {
       folder: it.source.folder,
       uid: msg.uid,
       uidValidity: it.uidValidity,
-      messageId: env.messageId ?? null,
+      ...threadHeaders(msg),
       subject: env.subject ?? '',
       from: addresses(env.from),
       to: addresses(env.to),
@@ -362,7 +452,8 @@ export class MailService {
 
   /**
    * List the newest messages across one or more mailboxes (a single folder, or every account's
-   * INBOX for the unified view), merged by date with per-source cursors.
+   * INBOX for the unified view), merged by date with per-source cursors. The rest of their
+   * conversations comes along in `related` (see relatedItems).
    */
   async listMessages(
     userId: string,
@@ -393,9 +484,11 @@ export class MailService {
       const k = sourceKey(s);
       if (!cursor[k] && previous[k]) cursor[k] = previous[k];
     }
-    const snippets = await this.snippets(userId, picked);
+    const related = await this.relatedItems(userId, picked);
+    const snippets = await this.snippets(userId, [...picked, ...related]);
     return {
       messages: picked.map((it) => this.toSummary(it, snippets.get(it) ?? '')),
+      related: related.map((it) => this.toSummary(it, snippets.get(it) ?? '')),
       cursor: more ? encodeCursor(cursor) : null,
       errors,
       reset,
