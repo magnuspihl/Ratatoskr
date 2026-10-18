@@ -3,6 +3,7 @@ import type {
   ActionResult,
   AccountInput,
   AccountView,
+  AuthMethods,
   ComposePayload,
   DomainName,
   DraftResult,
@@ -65,6 +66,10 @@ export const api = {
   me: () => request<Me>('GET', '/api/me'),
   savePreferences: (p: Preferences) => request<Preferences>('PUT', '/api/preferences', p),
   logout: () => request<{ redirect: string }>('POST', '/auth/logout'),
+  authMethods: () => request<AuthMethods>('GET', '/auth/methods'),
+  passwordLogin: (username: string, password: string) => request<{ ok: true }>('POST', '/auth/password/login', { username, password }),
+  register: (username: string, password: string) => request<{ ok: true }>('POST', '/auth/password/register', { username, password }),
+  changePassword: (current: string, next: string) => request<{ ok: true }>('PUT', '/api/password', { current, next }),
 
   accounts: () => request<AccountView[]>('GET', '/api/accounts'),
   testAccount: (account: AccountInput, id?: string) => request<{ ok: true }>('POST', '/api/accounts/test', { account, id }),

@@ -15,7 +15,16 @@ export interface Config {
     clientId: string;
     clientSecret: string;
     scopes: string;
+    /** Button text on the login page, e.g. "Authentik". */
+    label: string;
   } | null;
+  /** Username/password login. */
+  passwordLogin: boolean;
+  /**
+   * Who may create a password account: anyone (`open`), only the very first user of an empty
+   * instance (`first`), or nobody (`closed`).
+   */
+  registration: Registration;
   /** Development-only login bypass. Never honoured when NODE_ENV=production. */
   devLogin: boolean;
   /**
@@ -35,6 +44,8 @@ export interface Config {
   /** Contact for push services (VAPID `sub`): a mailto: or https: URL. */
   vapidSubject: string;
 }
+
+export type Registration = 'open' | 'first' | 'closed';
 
 function bool(v: string | undefined, def: boolean): boolean {
   if (v === undefined || v === '') return def;
@@ -68,13 +79,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         clientId: env.OIDC_CLIENT_ID ?? '',
         clientSecret: env.OIDC_CLIENT_SECRET ?? '',
         scopes: env.OIDC_SCOPES || 'openid email profile',
+        label: env.OIDC_LABEL?.trim() || 'Single sign-on',
       }
     : null;
   if (oidc && !oidc.clientId) errors.push('OIDC_CLIENT_ID is required when OIDC_ISSUER_URL is set');
 
+  // Without OIDC, password login is the default; with OIDC it has to be switched on explicitly, so
+  // existing single sign-on setups don't suddenly accept passwords.
+  const passwordLogin = bool(env.RATATOSKR_PASSWORD_LOGIN, !oidc);
+  const registration = (env.RATATOSKR_REGISTRATION || 'first').toLowerCase() as Registration;
+  if (!['open', 'first', 'closed'].includes(registration)) {
+    errors.push('RATATOSKR_REGISTRATION must be open, first or closed');
+  }
+
   const devLogin = !production && bool(env.RATATOSKR_DEV_LOGIN, false);
-  if (!oidc && !devLogin) {
-    errors.push('OIDC_ISSUER_URL is required (or RATATOSKR_DEV_LOGIN=true outside production)');
+  if (!oidc && !passwordLogin && !devLogin) {
+    errors.push('Enable a login method: OIDC_ISSUER_URL, RATATOSKR_PASSWORD_LOGIN=true (or RATATOSKR_DEV_LOGIN=true outside production)');
   }
 
   let devAllowedHostSuffix: string | null = null;
@@ -105,6 +125,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     trustProxy: bool(env.RATATOSKR_TRUST_PROXY, false),
     logLevel: env.LOG_LEVEL || 'info',
     oidc,
+    passwordLogin,
+    registration,
     devLogin,
     devAllowedHostSuffix,
     blockPrivateMailHosts: bool(env.RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS, false),

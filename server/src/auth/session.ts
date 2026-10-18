@@ -8,6 +8,8 @@ const LOGIN_TTL = 10 * 60;
 
 export interface SessionData {
   uid: string;
+  /** How the user signed in. Missing in sessions from before password login existed (those are OIDC). */
+  via?: 'oidc' | 'password' | 'dev';
   /** id_token for RP-initiated logout, if the provider supports it. */
   idt?: string;
 }

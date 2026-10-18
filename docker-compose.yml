@@ -12,6 +12,10 @@ services:
       OIDC_ISSUER_URL: https://auth.example.com/application/o/ratatoskr/
       OIDC_CLIENT_ID: ratatoskr
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET in .env}
+      # OIDC_LABEL: Authentik
+      # Also allow username/password login next to OIDC (it's the default without OIDC_*):
+      # RATATOSKR_PASSWORD_LOGIN: "true"
+      # RATATOSKR_REGISTRATION: first   # open | first | closed
     volumes:
       - ratatoskr-data:/data
 

@@ -342,6 +342,10 @@ legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
 .login-card .brand-mark { width: 52px; height: 52px; margin: 0 auto; }
 .login-card h1 { margin: 0; font-size: 22px; letter-spacing: -0.02em; }
 .login-card .btn { height: 40px; justify-content: center; }
+.login-form { display: flex; flex-direction: column; gap: 10px; text-align: left; margin-top: 6px; }
+.login-form .input { height: 40px; }
+.login-divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+.login-divider::before, .login-divider::after { content: ''; flex: 1; border-top: 1px solid var(--border); }
 
 .mobile-only { display: none !important; }
 
@@ -386,3 +390,5 @@ legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }
+.password-form { display: flex; flex-direction: column; gap: 8px; }
+.password-form .label { margin: 0; }

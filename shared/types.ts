@@ -220,6 +220,17 @@ export interface Me {
   name: string;
   email: string;
   preferences: Preferences;
+  /** Signs in with a username and password, so can change it in Settings. */
+  hasPassword: boolean;
+}
+
+/** Login options shown on the sign-in page (GET /auth/methods). */
+export interface AuthMethods {
+  password: boolean;
+  /** A new password account can be created right now. */
+  registration: boolean;
+  oidc: { label: string } | null;
+  dev: boolean;
 }
 
 export type ServerEvent =

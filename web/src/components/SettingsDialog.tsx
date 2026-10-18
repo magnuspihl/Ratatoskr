@@ -13,7 +13,7 @@ const SWIPE_OPTIONS: [SwipeAction, string][] = [
   ['toggleFlag', 'Flag / unflag'],
 ];
 
-export function SettingsDialog({ prefs, onClose }: { prefs: Preferences; onClose: () => void }) {
+export function SettingsDialog({ prefs, hasPassword, onClose }: { prefs: Preferences; hasPassword: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const [v, setV] = useState(prefs);
   const [error, setError] = useState<string | null>(null);
@@ -79,10 +79,61 @@ export function SettingsDialog({ prefs, onClose }: { prefs: Preferences; onClose
           </label>
           <Notifications prefs={v} save={save} />
           <ImageDomains />
+          {hasPassword && <ChangePassword />}
           {error && <div className="error-text">{error}</div>}
         </div>
       </div>
     </div>
+  );
+}
+
+function ChangePassword() {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  const submit = async () => {
+    setDone(false);
+    if (next !== confirm) return setError('New passwords do not match');
+    setBusy(true);
+    setError(null);
+    try {
+      await api.changePassword(current, next);
+      setCurrent('');
+      setNext('');
+      setConfirm('');
+      setDone(true);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form
+      className="password-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <label className="label">Change password</label>
+      <input type="text" name="username" autoComplete="username" hidden readOnly />
+      <input className="input" type="password" autoComplete="current-password" placeholder="Current password" aria-label="Current password" required maxLength={1000} value={current} onChange={(e) => setCurrent(e.target.value)} />
+      <input className="input" type="password" autoComplete="new-password" placeholder="New password (at least 10 characters)" aria-label="New password" required minLength={10} maxLength={256} value={next} onChange={(e) => setNext(e.target.value)} />
+      <input className="input" type="password" autoComplete="new-password" placeholder="Repeat new password" aria-label="Repeat new password" required maxLength={256} value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+      <div>
+        <button className="btn" type="submit" disabled={busy}>
+          Change password
+        </button>
+      </div>
+      {done && <div className="hint">Password changed.</div>}
+      {error && <div className="error-text">{error}</div>}
+    </form>
   );
 }
 

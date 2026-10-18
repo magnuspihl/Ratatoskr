@@ -453,7 +453,7 @@ export function App() {
         />
       )}
       {dialog === 'accounts' && <AccountsDialog accounts={accounts} startWithNew={accounts.length === 0} onClose={() => closeOverlay('accounts')} />}
-      {dialog === 'settings' && <SettingsDialog prefs={me.data!.preferences} onClose={() => closeOverlay('settings')} />}
+      {dialog === 'settings' && <SettingsDialog prefs={me.data!.preferences} hasPassword={me.data!.hasPassword} onClose={() => closeOverlay('settings')} />}
       <div className="toast-stack" role="status" aria-live="polite">
         {toasts.map((t) => (
           <div key={t.id} className={`toast ${t.error ? 'error' : ''}`}>

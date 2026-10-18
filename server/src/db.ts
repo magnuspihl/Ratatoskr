@@ -61,6 +61,8 @@ const MIGRATIONS: string[] = [
      uid_validity TEXT NOT NULL,
      last_uid INTEGER NOT NULL
    );`,
+  // Username/password login: such users have issuer 'local' and the normalised username as subject.
+  `ALTER TABLE users ADD COLUMN password_hash TEXT;`,
 ];
 
 /** Most devices one user can have notifications on; the oldest subscription is dropped beyond that. */
@@ -82,6 +84,8 @@ export interface User {
   email: string;
   name: string;
   preferences: Preferences;
+  /** Signs in with a username and password (as opposed to OIDC). */
+  hasPassword: boolean;
 }
 
 /** Full account including decrypted credentials. Server-side only, never serialise to clients. */
@@ -187,7 +191,7 @@ export class Store {
 
   getUser(id: string): User | null {
     const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as
-      | { id: string; issuer: string; subject: string; email: string; name: string; preferences: string }
+      | { id: string; issuer: string; subject: string; email: string; name: string; preferences: string; password_hash: string | null }
       | undefined;
     if (!row) return null;
     let prefs: Partial<Preferences> = {};
@@ -203,7 +207,42 @@ export class Store {
       email: row.email,
       name: row.name,
       preferences: { ...DEFAULT_PREFERENCES, ...prefs },
+      hasPassword: row.password_hash !== null,
     };
+  }
+
+  countUsers(): number {
+    return (this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
+  }
+
+  /** A password user and their stored hash, by normalised username. */
+  findPasswordUser(issuer: string, username: string): { user: User; passwordHash: string } | null {
+    const row = this.db
+      .prepare('SELECT id, password_hash FROM users WHERE issuer = ? AND subject = ? AND password_hash IS NOT NULL')
+      .get(issuer, username) as { id: string; password_hash: string } | undefined;
+    return row ? { user: this.getUser(row.id)!, passwordHash: row.password_hash } : null;
+  }
+
+  /** Creates a password user; null if the username is taken. */
+  createPasswordUser(issuer: string, username: string, passwordHash: string): User | null {
+    const id = crypto.randomUUID();
+    const email = username.includes('@') ? username : '';
+    const res = this.db
+      .prepare(
+        `INSERT INTO users (id, issuer, subject, email, name, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (issuer, subject) DO NOTHING`,
+      )
+      .run(id, issuer, username, email, username, passwordHash, Date.now());
+    return res.changes > 0 ? this.getUser(id) : null;
+  }
+
+  setPasswordHash(userId: string, passwordHash: string) {
+    this.db.prepare('UPDATE users SET password_hash = ? WHERE id = ? AND password_hash IS NOT NULL').run(passwordHash, userId);
+  }
+
+  getPasswordHash(userId: string): string | null {
+    const row = this.db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as { password_hash: string | null } | undefined;
+    return row?.password_hash ?? null;
   }
 
   setPreferences(userId: string, prefs: Preferences) {
