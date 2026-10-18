@@ -525,6 +525,7 @@ export function App() {
         }
         theme={theme}
         markReadOnOpen={me.data!.preferences.markReadOnOpen}
+        contactPhotos={me.data!.preferences.contactPhotos}
         onAction={(refs, a) => void act(refs, a)}
         snoozeSignal={snoozeSignal}
         onReply={reply}

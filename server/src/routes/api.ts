@@ -7,6 +7,7 @@ import type { Store, User } from '../db.js';
 import { MailServerError, testConnection } from '../imap/connect.js';
 import { MessageGoneError, StaleError, type ListSource, type MailService } from '../imap/mail.js';
 import { NotFoundError, type ImapPool } from '../imap/pool.js';
+import { AvatarService, normaliseEmail } from '../net/avatars.js';
 import { RemoteImageCache, type RemoteImage } from '../net/remoteImages.js';
 import { displayDomain, MAX_ALLOWED_DOMAINS, normaliseDomain } from '../mail/imageAllowlist.js';
 import { FailureLimiter, hashPassword, passwordSchema, verifyPassword } from '../auth/password.js';
@@ -73,6 +74,7 @@ export const prefsSchema = z.object({
   swipeRight: swipe,
   notificationContent: z.enum(['full', 'minimal']).default('full'),
   screenTransitions: z.enum(['off', 'fast', 'medium', 'slow']).default('fast'),
+  contactPhotos: z.boolean().default(true),
 });
 
 const pushSubscriptionSchema = z.object({
@@ -128,10 +130,13 @@ export interface ApiDeps {
   pushHostCheck?: (host: string) => Promise<void>;
   /** Replaces the real remote image fetcher (tests only). */
   fetchImage?: (url: string) => Promise<RemoteImage>;
+  /** Replaces the contact picture lookup (tests only). */
+  avatars?: AvatarService;
 }
 
 export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
   const { config, store, sessions, pool, mail, compose, push, snooze, vapidPublicKey, pushHostCheck, fetchImage } = deps;
+  const avatars = deps.avatars ?? new AvatarService();
 
   app.decorateRequest('user', null);
 
@@ -424,6 +429,25 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
     } catch (err) {
       return sendError(reply, err);
     }
+  });
+
+  // A sender's picture, fetched by the server so the browser never contacts Gravatar & co.
+  app.get('/api/avatar', async (req, reply) => {
+    const q = z.object({ email: z.string().max(320) }).safeParse(req.query);
+    const email = q.success ? normaliseEmail(q.data.email) : null;
+    if (!email) return reply.code(400).send({ error: 'Invalid address' });
+    if (!req.user!.preferences.contactPhotos) {
+      // Turned off: no lookup, and nothing the browser keeps for when it is turned back on.
+      return reply.header('cache-control', 'no-store').code(404).send({ error: 'Contact pictures are off' });
+    }
+    const img = await avatars.lookup(uid(req), email);
+    // Let the browser keep the answer, a miss included, so it doesn't ask again on every render.
+    reply.header('cache-control', `private, max-age=${img ? 86400 : 3600}`);
+    if (!img) return reply.code(404).send({ error: 'No picture' });
+    return reply
+      .header('content-type', img.contentType)
+      .header('content-security-policy', "default-src 'none'; sandbox")
+      .send(img.body);
   });
 
   app.post('/api/messages/actions', async (req, reply) => {

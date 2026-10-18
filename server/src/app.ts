@@ -16,6 +16,7 @@ import { ComposeService } from './mail/send.js';
 import { SnoozeService } from './mail/snooze.js';
 import { PushService } from './push/service.js';
 import { createPushTransport, vapidKeysFromSeed, type PushTransport } from './push/webpush.js';
+import type { AvatarService } from './net/avatars.js';
 import type { RemoteImage } from './net/remoteImages.js';
 import { registerApiRoutes } from './routes/api.js';
 import { inboxUnread } from '../../shared/unread.js';
@@ -62,6 +63,8 @@ export async function buildApp(
     store?: Store;
     logger?: boolean;
     fetchImage?: (url: string) => Promise<RemoteImage>;
+    /** Replaces the contact picture lookup (tests only). */
+    avatars?: AvatarService;
     /** Replaces real Web Push delivery (tests only). */
     pushTransport?: PushTransport;
     /** Replaces the DNS check of push service hosts (tests only). */
@@ -142,6 +145,7 @@ export async function buildApp(
     vapidPublicKey: vapid.publicKey,
     pushHostCheck: opts.pushHostCheck,
     fetchImage: opts.fetchImage,
+    avatars: opts.avatars,
   });
   live = await registerWebSocket(app, config, store, sessions, pool);
 

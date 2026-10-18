@@ -245,6 +245,8 @@ export interface Preferences {
   notificationContent: NotificationContent;
   /** On phones, the squirrel runs across the screen when switching views. */
   screenTransitions: TransitionSpeed;
+  /** Show senders' pictures (Gravatar, Libravatar, their domain's icon) instead of initials. */
+  contactPhotos: boolean;
 }
 
 /** A browser's Web Push subscription, as produced by PushSubscription.toJSON(). */

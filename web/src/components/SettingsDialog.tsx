@@ -86,6 +86,15 @@ export function SettingsDialog({ prefs, hasPassword, onClose }: { prefs: Prefere
             Mark messages as read when opened
           </label>
           <div>
+            <label className="check">
+              <input type="checkbox" checked={v.contactPhotos} onChange={(e) => void save({ ...v, contactPhotos: e.target.checked })} />
+              Show contact pictures
+            </label>
+            <div className="hint">
+              From Gravatar, Libravatar or the sender's website, fetched by the server so they never see your IP address. Otherwise initials are shown.
+            </div>
+          </div>
+          <div>
             <label className="label" htmlFor="screen-transitions">
               Screen Transitions
             </label>
