@@ -1,5 +1,6 @@
 import { AlarmClock, Archive, Flag, FolderInput, Mail, MailCheck, MailOpen, Menu, Paperclip, RefreshCw, Search, Star, Trash2, X, Reply } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
+import { participants, type ConversationRow } from '../../../shared/threads';
 import type { AccountFolders, AccountView, MessageAction, MessageSummary, SwipeAction } from '../../../shared/types';
 import type { Direction } from '../swipe';
 import { SwipeRow } from './SwipeRow';
@@ -14,7 +15,8 @@ interface Props {
   isSentLike: boolean;
   accounts: Map<string, AccountView>;
   folders: AccountFolders[] | undefined;
-  messages: MessageSummary[];
+  /** One row per conversation. */
+  messages: ConversationRow[];
   loading: boolean;
   fetchingMore: boolean;
   hasMore: boolean;
@@ -173,7 +175,13 @@ export function MessageList(p: Props) {
         {p.messages.map((m) => {
           const key = refKey(m);
           const acc = p.accounts.get(m.accountId);
-          const who = p.isSentLike ? `To: ${m.to.map(displayName).join(', ') || '(no recipients)'}` : displayName(m.from[0]) || '(unknown sender)';
+          const me = acc?.email.toLowerCase();
+          const who = p.isSentLike
+            ? `To: ${m.to.map(displayName).join(', ') || '(no recipients)'}`
+            : participants(m.thread, (a) => a.toLowerCase() === me) || displayName(m.from[0]) || '(unknown sender)';
+          // The open message may be any message of the conversation, not just the one on the row.
+          const has = (k: string | null) => k !== null && (k === key || m.thread.some((x) => refKey(x) === k));
+          const isOpen = has(p.openKey);
           return (
             <SwipeRow
               key={key}
@@ -184,7 +192,7 @@ export function MessageList(p: Props) {
               removes={(d) => p.swipeRemoves(m, d)}
               confirm={(d) => p.confirmSwipe(m, d)}
               onSwipe={(d) => p.onSwipe(m, d)}
-              className={`row ${m.seen ? '' : 'unread'} ${p.openKey === key ? 'selected' : ''} ${p.lastOpenKey === key && p.openKey !== key ? 'recent' : ''} ${p.checked.has(key) ? 'checked' : ''} ${p.unreadOnly && m.seen ? 'read-in-filter' : ''}`}
+              className={`row ${m.seen ? '' : 'unread'} ${isOpen ? 'selected' : ''} ${has(p.lastOpenKey) && !isOpen ? 'recent' : ''} ${p.checked.has(key) ? 'checked' : ''} ${p.unreadOnly && m.seen ? 'read-in-filter' : ''}`}
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey) p.onCheck(m, !p.checked.has(key));
                 else p.onOpen(m);
@@ -199,6 +207,7 @@ export function MessageList(p: Props) {
                   <span className="row-from">
                     {m.draft && <span style={{ color: 'var(--danger)', fontWeight: 600 }}>Draft </span>}
                     {who}
+                    {m.thread.length > 1 && <span className="row-count">{m.thread.length}</span>}
                   </span>
                   {m.answered && <Reply size={13} className="ind" />}
                   {m.hasAttachments && <Paperclip size={13} className="ind" />}

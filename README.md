@@ -25,6 +25,11 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
   WebSocket per browser session.
 - Message list with sender, subject, snippet, date, unread/flagged/answered/attachment
   indicators, and an account colour tag in the unified view.
+- Conversations, Gmail-style: a message and its replies are one row ("Ada, me 3") and are read
+  together, older messages folded. Your replies are found in the Sent folder, also when you
+  sent them from another mail client. Messages belong together when they share Message-IDs
+  (References / In-Reply-To) and their subjects match apart from "Re:" and the like. Actions on
+  a conversation apply to all its messages in the folder; the copies in Sent are left alone.
 - Reading plain text and HTML, with inline (`cid:`) images and attachment downloads. Remote
   images are blocked by default; "Load images" has the server fetch them and embed them in the
   message, so the sender never sees your IP address. "Always load from example.com" adds the
