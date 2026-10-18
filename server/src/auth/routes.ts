@@ -81,16 +81,18 @@ export async function registerAuthRoutes(app: FastifyInstance, config: Config, s
       if (!claims?.sub) throw new Error('ID token has no subject');
       let email = typeof claims.email === 'string' ? claims.email : '';
       let name = typeof claims.name === 'string' ? claims.name : '';
-      if ((!email || !name) && tokens.access_token) {
+      let username = typeof claims.preferred_username === 'string' ? claims.preferred_username : '';
+      if ((!email || !name || !username) && tokens.access_token) {
         try {
           const info = await oidc.fetchUserInfo(cfg, tokens.access_token, claims.sub);
           email ||= typeof info.email === 'string' ? info.email : '';
-          name ||= typeof info.name === 'string' ? info.name : typeof info.preferred_username === 'string' ? info.preferred_username : '';
+          username ||= typeof info.preferred_username === 'string' ? info.preferred_username : '';
+          name ||= typeof info.name === 'string' ? info.name : username;
         } catch {
           /* userinfo is optional */
         }
       }
-      const user = store.upsertUser(claims.iss, claims.sub, email, name || email || claims.sub);
+      const user = store.upsertUser(claims.iss, claims.sub, email, name || email || claims.sub, username.trim());
       sessions.write(reply, { uid: user.id, via: 'oidc', idt: tokens.id_token && tokens.id_token.length < 2500 ? tokens.id_token : undefined });
       return reply.redirect('/');
     } catch (err) {
@@ -124,7 +126,7 @@ export async function registerAuthRoutes(app: FastifyInstance, config: Config, s
   if (config.devLogin) {
     app.log.warn('RATATOSKR_DEV_LOGIN is enabled: anyone can log in as the local dev user. Never use this in production.');
     app.get('/auth/dev-login', async (_req, reply) => {
-      const user = store.upsertUser('dev-login', 'dev', 'user@example.com', 'Dev User');
+      const user = store.upsertUser('dev-login', 'dev', 'user@example.com', 'Dev User', 'dev');
       sessions.write(reply, { uid: user.id, via: 'dev' });
       return reply.redirect('/');
     });

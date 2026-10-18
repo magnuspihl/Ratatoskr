@@ -91,9 +91,48 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | `RATATOSKR_MAX_MESSAGE_MB` | no | `50` | Largest message the server downloads for display. |
 | `RATATOSKR_MAX_UPLOAD_MB` | no | `25` | Largest total attachment upload when composing. |
 | `RATATOSKR_VAPID_SUBJECT` | no | `RATATOSKR_BASE_URL` if it is `https://`, else `mailto:postmaster@<host>` | Contact sent to push services (Apple, Google, Mozilla) with every notification: a `mailto:` or `https:` URL. |
+| `RATATOSKR_DEFAULT_*` | no | – | Starting values for new mail accounts, see [Default account settings](#default-account-settings). |
 | `LOG_LEVEL` | no | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
 | `RATATOSKR_DEV_LOGIN` | no | `false` | Development only: log in as a local dev user without a password or OIDC. Ignored when `NODE_ENV=production` (always set in the image). |
 | `RATATOSKR_DEV_ALLOWED_HOST_SUFFIX` | no | – | Development only: also serve the dev server on any host ending in this suffix (see [Development](#development)). Ignored when `NODE_ENV=production` and by the production build. |
+
+### Default account settings
+
+If your users all get their mail from the same provider, set the server details once and the
+**Add account** form starts out filled in. Users can still change every field.
+
+| Variable | Description |
+| --- | --- |
+| `RATATOSKR_DEFAULT_IMAP_HOST` / `RATATOSKR_DEFAULT_SMTP_HOST` | Incoming and outgoing server. |
+| `RATATOSKR_DEFAULT_IMAP_SECURITY` / `RATATOSKR_DEFAULT_SMTP_SECURITY` | `tls` (default), `starttls` or `none`. |
+| `RATATOSKR_DEFAULT_IMAP_PORT` / `RATATOSKR_DEFAULT_SMTP_PORT` | Defaults to the standard port for the security mode (993/143, 465/587). |
+| `RATATOSKR_DEFAULT_MAIL_USERNAME` | Username for IMAP and SMTP. |
+| `RATATOSKR_DEFAULT_EMAIL` | Email address of the account. |
+| `RATATOSKR_DEFAULT_DISPLAY_NAME` | Name shown to recipients. |
+| `RATATOSKR_DEFAULT_ACCOUNT_LABEL` | Account label in the sidebar. |
+| `RATATOSKR_DEFAULT_MAIL_PASSWORD` | Optional shared password for IMAP and SMTP. |
+
+All of them except the password can contain tokens that are filled in for each user:
+
+- `{username}`: the login username of password users; for OIDC users the provider's
+  `preferred_username` (or, without one, the part of their email address before the `@`).
+- `{email}`: the user's email address from login.
+- `{name}`: the user's name from login.
+
+If a user has no value for a token (an OIDC user without an email address, say), the field starts
+empty instead. A misspelled token stops the server from starting.
+
+```env
+RATATOSKR_DEFAULT_IMAP_HOST=imap.example.com
+RATATOSKR_DEFAULT_SMTP_HOST=smtp.example.com
+RATATOSKR_DEFAULT_MAIL_USERNAME={username}@example.com
+RATATOSKR_DEFAULT_EMAIL={username}@example.com
+RATATOSKR_DEFAULT_DISPLAY_NAME={name}
+```
+
+The default password is taken literally and never sent to the browser. When a user leaves the
+password blank, the server fills it in, but only for the default server: if the user points the
+account at a different host, they have to enter that host's password themselves.
 
 ### Notifications
 

@@ -1,5 +1,7 @@
 import path from 'node:path';
 import { parseHostSuffix } from '../../shared/devHosts.js';
+import type { TlsMode } from '../../shared/types.js';
+import { TEMPLATE_TOKENS, unknownTokens, type AccountDefaultsConfig } from './accountDefaults.js';
 
 export interface Config {
   production: boolean;
@@ -43,6 +45,8 @@ export interface Config {
   webDir: string;
   /** Contact for push services (VAPID `sub`): a mailto: or https: URL. */
   vapidSubject: string;
+  /** What new mail accounts start with (templates with {username} etc.). */
+  accountDefaults: AccountDefaultsConfig;
 }
 
 export type Registration = 'open' | 'first' | 'closed';
@@ -113,6 +117,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     errors.push('RATATOSKR_VAPID_SUBJECT must be a mailto: or https: URL');
   }
 
+  const accountDefaults = loadAccountDefaults(env, errors);
+
   if (errors.length) throw new Error(`Invalid configuration:\n  - ${errors.join('\n  - ')}`);
 
   return {
@@ -135,5 +141,38 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxUploadBytes: int(env.RATATOSKR_MAX_UPLOAD_MB, 25) * 1024 * 1024,
     webDir: path.resolve(env.RATATOSKR_WEB_DIR || './dist/web'),
     vapidSubject,
+    accountDefaults,
+  };
+}
+
+function loadAccountDefaults(env: NodeJS.ProcessEnv, errors: string[]): AccountDefaultsConfig {
+  const template = (name: string) => {
+    const v = env[name]?.trim() ?? '';
+    const unknown = unknownTokens(v);
+    if (unknown.length) {
+      errors.push(`${name} uses unknown token(s) ${unknown.map((t) => `{${t}}`).join(', ')}; use ${TEMPLATE_TOKENS.map((t) => `{${t}}`).join(', ')}`);
+    }
+    return v;
+  };
+  const server = (kind: 'IMAP' | 'SMTP') => {
+    const portName = `RATATOSKR_DEFAULT_${kind}_PORT`;
+    const tlsName = `RATATOSKR_DEFAULT_${kind}_SECURITY`;
+    const rawPort = env[portName]?.trim();
+    const port = rawPort ? Number(rawPort) : null;
+    if (port !== null && !(Number.isInteger(port) && port >= 1 && port <= 65535)) errors.push(`${portName} must be a port number`);
+    const rawTls = env[tlsName]?.trim().toLowerCase();
+    const tls = rawTls ? (rawTls as TlsMode) : null;
+    if (tls && !['tls', 'starttls', 'none'].includes(tls)) errors.push(`${tlsName} must be tls, starttls or none`);
+    return { host: template(`RATATOSKR_DEFAULT_${kind}_HOST`), port, tls };
+  };
+  return {
+    name: template('RATATOSKR_DEFAULT_ACCOUNT_LABEL'),
+    displayName: template('RATATOSKR_DEFAULT_DISPLAY_NAME'),
+    email: template('RATATOSKR_DEFAULT_EMAIL'),
+    imap: server('IMAP'),
+    smtp: server('SMTP'),
+    user: template('RATATOSKR_DEFAULT_MAIL_USERNAME'),
+    // Taken literally (no tokens, not trimmed): braces and spaces can be part of a password.
+    password: env.RATATOSKR_DEFAULT_MAIL_PASSWORD ?? '',
   };
 }
