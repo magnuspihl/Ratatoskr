@@ -77,6 +77,10 @@ export function SettingsDialog({ prefs, hasPassword, onClose }: { prefs: Prefere
             <input type="checkbox" checked={v.markReadOnOpen} onChange={(e) => void save({ ...v, markReadOnOpen: e.target.checked })} />
             Mark messages as read when opened
           </label>
+          <label className="check">
+            <input type="checkbox" checked={v.squirrelTransitions} onChange={(e) => void save({ ...v, squirrelTransitions: e.target.checked })} />
+            Squirrel screen transitions (on phones)
+          </label>
           <Notifications prefs={v} save={save} />
           <ImageDomains />
           {hasPassword && <ChangePassword />}

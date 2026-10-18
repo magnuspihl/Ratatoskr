@@ -215,6 +215,8 @@ export interface Preferences {
   swipeLeft: SwipeAction;
   swipeRight: SwipeAction;
   notificationContent: NotificationContent;
+  /** On phones, the squirrel runs across the screen when switching views. */
+  squirrelTransitions: boolean;
 }
 
 /** A browser's Web Push subscription, as produced by PushSubscription.toJSON(). */
