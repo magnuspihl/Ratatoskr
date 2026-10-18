@@ -16,6 +16,9 @@
   --text-2: #55554f;
   --muted: #8b8a84;
   --accent: #c2410c;
+  /* Filled accent (primary buttons) and the squirrel stay the icon's orange in both themes; --accent is for text and
+     outline icons, and lightens in dark mode to stay legible. */
+  --accent-fill: #c2410c;
   --accent-hover: #a7380a;
   --accent-text: #ffffff;
   --accent-soft: #fdeee6;
@@ -31,7 +34,7 @@
   --swipe-archive: #16a34a;
   --swipe-read: #2563eb;
   --swipe-flag: #d39a00;
-  --squirrel: #502513;
+  --squirrel: var(--accent-fill);
   color-scheme: light;
 }
 
@@ -48,8 +51,7 @@
   --text-2: #b4b3ad;
   --muted: #7f7e79;
   --accent: #fb923c;
-  --accent-hover: #fdba74;
-  --accent-text: #1b1206;
+  --accent-hover: #d9480f;
   --accent-soft: rgba(251, 146, 60, 0.14);
   --danger: #f87171;
   --success: #4ade80;
@@ -59,7 +61,6 @@
   --shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.55);
   --message-bg: #1b1c1f;
   --link: #7cb4ff;
-  --squirrel: #c89b6d;
   --swipe-delete: #b91c1c;
   --swipe-archive: #15803d;
   --swipe-read: #1d4ed8;
@@ -92,7 +93,7 @@ svg { flex-shrink: 0; }
 }
 .btn:hover { background: var(--hover); }
 .btn:disabled { opacity: 0.55; cursor: default; }
-.btn.primary { background: var(--accent); border-color: transparent; color: var(--accent-text); }
+.btn.primary { background: var(--accent-fill); border-color: transparent; color: var(--accent-text); }
 .btn.primary:hover { background: var(--accent-hover); }
 .btn.danger { color: var(--danger); }
 .btn.ghost { border-color: transparent; background: transparent; }
@@ -427,7 +428,7 @@ legend { padding: 0 6px; font-weight: 600; font-size: 13px; }
 .snooze-menu button .muted { font-size: 12px; font-variant-numeric: tabular-nums; }
 .snooze-custom { display: flex; flex-direction: column; gap: 6px; padding: 4px 6px 6px; border-top: 1px solid var(--border); margin-top: 4px; }
 .snooze-custom .menu-label { padding: 4px 4px 0; }
-.menu .snooze-custom .btn.primary { justify-content: center; background: var(--accent); }
+.menu .snooze-custom .btn.primary { justify-content: center; background: var(--accent-fill); }
 .menu .snooze-custom .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
 .row-date.snoozed { display: inline-flex; align-items: center; gap: 3px; color: var(--accent); }
 

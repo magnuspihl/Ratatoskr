@@ -6,9 +6,10 @@ import { Resvg } from '@resvg/resvg-js';
 
 const SRC = 'web/icons-src';
 const OUT = 'web/public/icons';
-const BG = '#fff7e6';
-const FG = '#502513';
-const TRUNK = process.env.TRUNK || '#c89b6d';
+// Squirrel in the app's accent orange (--accent), on its pale accent tint (--accent-soft), against a dark bark trunk.
+const BG = '#fdeee6';
+const FG = '#c2410c';
+const TRUNK = '#3a1d10';
 const BORDER = 56;
 const RADIUS = 270;
 
@@ -16,15 +17,17 @@ const original = fs.readFileSync(`${SRC}/original.svg`, 'utf8');
 const d = original.match(/<path d="([^"]+)"/)[1].replace(/\s+/g, ' ').trim();
 const svg = 'xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254"';
 
-// The trunk is widened to fill everything left of the squirrel and runs past the frame, in a lighter bark tone so
-// it doesn't outweigh the squirrel. The art is shrunk to clear the border and to stay inside the 80% safe circle
+// The trunk is widened to fill everything left of the squirrel and runs past the frame; being dark, it outlines the
+// orange squirrel even at favicon size. The art is shrunk to clear the border and to stay inside the 80% safe circle
 // that maskable icons are cropped to.
 const art = `<g transform="translate(627 627) scale(0.84) translate(-627 -627)"><rect x="-400" y="-400" width="863" height="2054" fill="${TRUNK}"/><path d="${d}" fill="${FG}"/></g>`;
-const inner = 1254 - 2 * BORDER;
+const tile = `x="${BORDER / 2}" y="${BORDER / 2}" width="${1254 - BORDER}" height="${1254 - BORDER}" rx="${RADIUS - BORDER / 2}"`;
 
 const variants = {
-  // Rounded tile with a border: favicon and the "any" purpose icons.
-  'icon.svg': `<svg ${svg}><title>Ratatoskr</title><defs><clipPath id="c"><rect x="${BORDER}" y="${BORDER}" width="${inner}" height="${inner}" rx="${RADIUS - BORDER}"/></clipPath></defs><rect x="${BORDER / 2}" y="${BORDER / 2}" width="${1254 - BORDER}" height="${1254 - BORDER}" rx="${RADIUS - BORDER / 2}" fill="${BG}" stroke="${FG}" stroke-width="${BORDER}"/><g clip-path="url(#c)">${art}</g></svg>\n`,
+  // Rounded tile with a border: favicon and the "any" purpose icons. The art is clipped to the middle of the border
+  // and the border is stroked on top, so the clip's anti-aliased edge is hidden instead of leaking background through
+  // as a light seam between trunk and border.
+  'icon.svg': `<svg ${svg}><title>Ratatoskr</title><defs><clipPath id="c"><rect ${tile}/></clipPath></defs><rect ${tile} fill="${BG}"/><g clip-path="url(#c)">${art}</g><rect ${tile} fill="none" stroke="${TRUNK}" stroke-width="${BORDER}"/></svg>\n`,
   // Full bleed, opaque: for launchers that apply their own mask (Android maskable, iOS home screen).
   'full-bleed.svg': `<svg ${svg}><title>Ratatoskr</title><rect width="1254" height="1254" fill="${BG}"/>${art}</svg>\n`,
   // Notification badge: Android only uses the alpha channel, so a white silhouette on transparent.
