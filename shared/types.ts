@@ -225,6 +225,9 @@ export interface DraftResult {
 /** full: sender and subject in phone notifications; minimal: only "New message" and the account. */
 export type NotificationContent = 'full' | 'minimal';
 
+/** Phone screen transitions (the running squirrel): off, or how quickly it runs. */
+export type TransitionSpeed = 'off' | 'fast' | 'medium' | 'slow';
+
 export interface Preferences {
   theme: 'system' | 'light' | 'dark';
   pageSize: number;
@@ -233,7 +236,7 @@ export interface Preferences {
   swipeRight: SwipeAction;
   notificationContent: NotificationContent;
   /** On phones, the squirrel runs across the screen when switching views. */
-  squirrelTransitions: boolean;
+  screenTransitions: TransitionSpeed;
 }
 
 /** A browser's Web Push subscription, as produced by PushSubscription.toJSON(). */

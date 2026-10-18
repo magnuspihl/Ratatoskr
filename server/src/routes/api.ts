@@ -72,7 +72,7 @@ export const prefsSchema = z.object({
   swipeLeft: swipe,
   swipeRight: swipe,
   notificationContent: z.enum(['full', 'minimal']).default('full'),
-  squirrelTransitions: z.boolean().default(true),
+  screenTransitions: z.enum(['off', 'fast', 'medium', 'slow']).default('fast'),
 });
 
 const pushSubscriptionSchema = z.object({

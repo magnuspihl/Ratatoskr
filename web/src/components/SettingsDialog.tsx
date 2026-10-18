@@ -1,9 +1,16 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import type { DomainName, NotificationContent, Preferences, SwipeAction } from '../../../shared/types';
+import type { DomainName, NotificationContent, Preferences, SwipeAction, TransitionSpeed } from '../../../shared/types';
 import { api } from '../api';
 import { currentEnvironment, currentSubscription, disablePush, enablePush, pushAvailability, type PushAvailability } from '../push';
+
+const TRANSITION_OPTIONS: [TransitionSpeed, string][] = [
+  ['off', 'Off'],
+  ['fast', 'Fast'],
+  ['medium', 'Medium'],
+  ['slow', 'Slow'],
+];
 
 const SWIPE_OPTIONS: [SwipeAction, string][] = [
   ['none', 'Nothing'],
@@ -77,10 +84,24 @@ export function SettingsDialog({ prefs, hasPassword, onClose }: { prefs: Prefere
             <input type="checkbox" checked={v.markReadOnOpen} onChange={(e) => void save({ ...v, markReadOnOpen: e.target.checked })} />
             Mark messages as read when opened
           </label>
-          <label className="check">
-            <input type="checkbox" checked={v.squirrelTransitions} onChange={(e) => void save({ ...v, squirrelTransitions: e.target.checked })} />
-            Squirrel screen transitions (on phones)
-          </label>
+          <div>
+            <label className="label" htmlFor="screen-transitions">
+              Screen Transitions
+            </label>
+            <select
+              id="screen-transitions"
+              className="select"
+              value={v.screenTransitions}
+              onChange={(e) => void save({ ...v, screenTransitions: e.target.value as TransitionSpeed })}
+            >
+              {TRANSITION_OPTIONS.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+            <div className="hint">On phones, the squirrel runs across the screen when you open the menu or a message.</div>
+          </div>
           <Notifications prefs={v} save={save} />
           <ImageDomains />
           {hasPassword && <ChangePassword />}

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { MAX_MS, MIN_MS, planRun, revealKeyframes, runFor, runsEnabled, SQUIRREL_SIZE, squirrelKeyframes, STRIDE } from '../src/squirrel';
+import { MAX_MS, MIN_MS, planRun, revealKeyframes, runFor, runSpeed, SQUIRREL_SIZE, squirrelKeyframes, STRIDE } from '../src/squirrel';
 
 const PHONE = { w: 390, h: 844 };
 
@@ -45,6 +45,30 @@ describe('planning a run', () => {
     expect(planRun('open', 390, 1200).cycle).toBeLessThan(planRun('open', 390, 900).cycle);
   });
 
+  it('takes longer at Medium and longer still at Slow, with Fast unchanged as the quickest', () => {
+    for (const kind of ['navOpen', 'navClose', 'open', 'close'] as const) {
+      const fast = planRun(kind, PHONE.w, PHONE.h, 'fast');
+      const medium = planRun(kind, PHONE.w, PHONE.h, 'medium');
+      const slow = planRun(kind, PHONE.w, PHONE.h, 'slow');
+      expect(fast).toEqual(planRun(kind, PHONE.w, PHONE.h));
+      expect(medium.duration).toBeGreaterThan(fast.duration);
+      expect(slow.duration).toBeGreaterThan(medium.duration);
+    }
+    // Fast keeps the original timing: about 0.3 s across a phone, capped at 0.45 s top to bottom.
+    expect(planRun('navOpen', PHONE.w, PHONE.h, 'fast').duration).toBe(284);
+    expect(planRun('open', PHONE.w, PHONE.h, 'fast').duration).toBe(MAX_MS);
+  });
+
+  it('slows the legs down along with the run at slower settings, so the squirrel never slides', () => {
+    for (const speed of ['fast', 'medium', 'slow'] as const) {
+      for (const kind of ['navOpen', 'open'] as const) {
+        const plan = planRun(kind, PHONE.w, PHONE.h, speed);
+        expect(plan.cycle * (Math.abs(plan.to - plan.from) / plan.duration)).toBeCloseTo(STRIDE, -1);
+      }
+    }
+    expect(planRun('navOpen', PHONE.w, PHONE.h, 'slow').cycle).toBeGreaterThan(planRun('navOpen', PHONE.w, PHONE.h, 'fast').cycle);
+  });
+
   it('starts just off one edge and finishes fully past the other', () => {
     expect(planRun('navOpen', PHONE.w, PHONE.h)).toMatchObject({ from: -SQUIRREL_SIZE, to: PHONE.w });
     expect(planRun('navClose', PHONE.w, PHONE.h)).toMatchObject({ from: PHONE.w, to: -SQUIRREL_SIZE });
@@ -80,15 +104,19 @@ describe('the new view following the squirrel', () => {
   });
 });
 
-describe('turning runs off', () => {
-  it('runs by default on phones', () => {
-    expect(runsEnabled(true, true, false)).toBe(true);
-    expect(runsEnabled(undefined, true, false)).toBe(true);
+describe('the Screen Transitions setting', () => {
+  it('runs at Fast by default on phones', () => {
+    expect(runSpeed(undefined, true, false)).toBe('fast');
   });
-  it('does not run when switched off in Settings, on the desktop layout, or with reduced motion', () => {
-    expect(runsEnabled(false, true, false)).toBe(false);
-    expect(runsEnabled(true, false, false)).toBe(false);
-    expect(runsEnabled(true, true, true)).toBe(false);
+  it('runs at the chosen speed', () => {
+    expect(runSpeed('fast', true, false)).toBe('fast');
+    expect(runSpeed('medium', true, false)).toBe('medium');
+    expect(runSpeed('slow', true, false)).toBe('slow');
+  });
+  it('does not run when set to Off, on the desktop layout, or with reduced motion', () => {
+    expect(runSpeed('off', true, false)).toBeNull();
+    expect(runSpeed('slow', false, false)).toBeNull();
+    expect(runSpeed('medium', true, true)).toBeNull();
   });
 });
 
