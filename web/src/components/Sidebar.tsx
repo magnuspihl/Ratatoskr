@@ -107,7 +107,11 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
               </button>
               {!isCollapsed && (
                 <>
-                  {!af && <div className="nav-error muted">Loading…</div>}
+                  {!af && (
+                    <div className="nav-loading" role="status" aria-label="Loading folders" title="Loading folders">
+                      <div className="spinner" />
+                    </div>
+                  )}
                   {af?.error && <div className="nav-error">{af.error}</div>}
                   {af &&
                     sortFolders(af.folders).map((f) => {

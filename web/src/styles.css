@@ -164,6 +164,8 @@ svg { flex-shrink: 0; }
 .nav-item .count { font-size: 12px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .nav-item.unread .name { color: var(--text); font-weight: 600; }
 .nav-error { font-size: 12px; color: var(--danger); padding: 2px 8px 6px; }
+.nav-loading { display: flex; justify-content: center; padding: 6px 0; }
+.nav-loading .spinner { width: 14px; height: 14px; }
 .sidebar-footer { border-top: 1px solid var(--border); padding: 8px; display: flex; align-items: center; gap: 4px; }
 .sidebar-footer .who { flex: 1; min-width: 0; font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 6px; }
 
