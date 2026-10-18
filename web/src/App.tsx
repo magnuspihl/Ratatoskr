@@ -464,6 +464,7 @@ export function App() {
       <Reader
         openRef={readerRef}
         account={readerRef ? accountMap.get(readerRef.accountId) : undefined}
+        multipleAccounts={accounts.length > 1}
         folders={readerRef ? folders.data?.find((f) => f.accountId === readerRef.accountId) : undefined}
         isDrafts={
           !!readerRef &&
