@@ -4,15 +4,16 @@ import { prefsSchema } from '../src/routes/api.js';
 
 const base = { theme: 'system', pageSize: 50, markReadOnOpen: true, swipeLeft: 'delete', swipeRight: 'archive', notificationContent: 'full' };
 
-describe('squirrel transitions preference', () => {
-  it('is on by default for new users', () => {
-    expect(DEFAULT_PREFERENCES.squirrelTransitions).toBe(true);
+describe('screen transitions preference', () => {
+  it('is Fast by default for new users', () => {
+    expect(DEFAULT_PREFERENCES.screenTransitions).toBe('fast');
   });
-  it('stays on when saved by a client that does not know about it yet', () => {
-    expect(prefsSchema.parse(base).squirrelTransitions).toBe(true);
+  it('stays Fast when saved by a client that does not know about it yet', () => {
+    expect(prefsSchema.parse(base).screenTransitions).toBe('fast');
   });
-  it('can be switched off and rejects non-boolean values', () => {
-    expect(prefsSchema.parse({ ...base, squirrelTransitions: false }).squirrelTransitions).toBe(false);
-    expect(prefsSchema.safeParse({ ...base, squirrelTransitions: 'no' }).success).toBe(false);
+  it('accepts Off, Fast, Medium and Slow and rejects anything else', () => {
+    for (const v of ['off', 'fast', 'medium', 'slow']) expect(prefsSchema.parse({ ...base, screenTransitions: v }).screenTransitions).toBe(v);
+    expect(prefsSchema.safeParse({ ...base, screenTransitions: 'ludicrous' }).success).toBe(false);
+    expect(prefsSchema.safeParse({ ...base, screenTransitions: false }).success).toBe(false);
   });
 });

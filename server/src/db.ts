@@ -102,7 +102,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   swipeLeft: 'delete',
   swipeRight: 'archive',
   notificationContent: 'full',
-  squirrelTransitions: true,
+  screenTransitions: 'fast',
 };
 
 export interface User {

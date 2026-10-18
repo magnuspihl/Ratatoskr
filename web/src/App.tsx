@@ -19,7 +19,7 @@ import { HOME, listRoute, openMessageFolder, parseLocation, viewKey, type Route 
 import { updateSticky, withSticky } from './sticky';
 import { removesFromList, swipeToAction, type Direction, type UndoStep } from './swipe';
 import { formatSnoozeTime } from './snooze';
-import { planRun, runFor, runsEnabled, type PaneView } from './squirrel';
+import { planRun, runFor, runSpeed, type PaneView } from './squirrel';
 import { refKey, toRef } from './util';
 
 export function App() {
@@ -81,15 +81,15 @@ export function App() {
   const shownView = useRef(view);
   const runId = useRef(0);
   const [run, setRun] = useState<(Run & { from: PaneView }) | null>(null);
-  const squirrelPref = me.data?.preferences.squirrelTransitions;
+  const transitionPref = me.data?.preferences.screenTransitions;
   useLayoutEffect(() => {
     const from = shownView.current;
     shownView.current = view;
     const kind = runFor(from, view);
     if (!kind) return;
-    const enabled = runsEnabled(squirrelPref, matchMedia('(max-width: 860px)').matches, matchMedia('(prefers-reduced-motion: reduce)').matches);
-    setRun(enabled ? { id: ++runId.current, plan: planRun(kind, window.innerWidth, window.innerHeight), from, to: view } : null);
-  }, [view, squirrelPref]);
+    const speed = runSpeed(transitionPref, matchMedia('(max-width: 860px)').matches, matchMedia('(prefers-reduced-motion: reduce)').matches);
+    setRun(speed ? { id: ++runId.current, plan: planRun(kind, window.innerWidth, window.innerHeight, speed), from, to: view } : null);
+  }, [view, transitionPref]);
   // While running back to the folder, the message stays up underneath rather than the empty reader.
   const lastOpen = useRef(open);
   if (open) lastOpen.current = open;

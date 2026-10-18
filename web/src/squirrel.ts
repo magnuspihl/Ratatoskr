@@ -4,6 +4,8 @@
  * close it; up the left edge to open a message and back down it to return to the folder.
  */
 
+import type { TransitionSpeed } from '../../shared/types';
+
 /** The phone layout's panes (see `data-view` on `.app`). */
 export type PaneView = 'nav' | 'list' | 'reader';
 
@@ -21,10 +23,14 @@ export function runFor(from: PaneView, to: PaneView): RunKind | null {
 export const SQUIRREL_SIZE = 64;
 /** Ground covered per eight-frame cycle: a sprinting squirrel bounds several body lengths a stride. */
 export const STRIDE = SQUIRREL_SIZE * 3.2;
-/** Preferred running speed (px/s); the run is then clamped to stay brief on tall screens. */
+/** Preferred running speed (px/s) at "fast"; the run is then clamped to stay brief on tall screens. */
 export const SPEED = 1600;
 export const MIN_MS = 240;
 export const MAX_MS = 450;
+
+export type RunSpeed = Exclude<TransitionSpeed, 'off'>;
+/** How much longer each setting takes than "fast" (speed and time limits alike). */
+export const SLOWDOWN: Record<RunSpeed, number> = { fast: 1, medium: 1.6, slow: 2.5 };
 
 export interface RunPlan {
   kind: RunKind;
@@ -44,12 +50,13 @@ export interface RunPlan {
 }
 
 /** Plans a run across a `width` x `height` screen. */
-export function planRun(kind: RunKind, width: number, height: number): RunPlan {
+export function planRun(kind: RunKind, width: number, height: number, speed: RunSpeed = 'fast'): RunPlan {
+  const k = SLOWDOWN[speed];
   const span = isHorizontal(kind) ? width : height;
   const s = SQUIRREL_SIZE;
   // From just off one edge until fully past the other.
   const distance = span + s;
-  const duration = Math.round(Math.min(MAX_MS, Math.max(MIN_MS, (distance / SPEED) * 1000)));
+  const duration = Math.round(Math.min(MAX_MS * k, Math.max(MIN_MS * k, (distance / SPEED) * k * 1000)));
   const cycle = Math.round(STRIDE / (distance / duration));
   const [from, to] = kind === 'open' || kind === 'navClose' ? [span, -s] : [-s, span];
   return { kind, duration, cycle, from, to, enter: s / 2 / distance, leave: (span + s / 2) / distance };
@@ -85,7 +92,11 @@ export function squirrelKeyframes(plan: RunPlan): Keyframe[] {
   return [{ transform: `translate${axis}(${plan.from}px)` }, { transform: `translate${axis}(${plan.to}px)` }];
 }
 
-/** Whether to run at all: the preference is on, the phone layout is showing, and motion is welcome. */
-export function runsEnabled(pref: boolean | undefined, phoneLayout: boolean, reducedMotion: boolean): boolean {
-  return pref !== false && phoneLayout && !reducedMotion;
+/**
+ * How fast to run, or null not to run at all: only on the phone layout, when motion is welcome and
+ * the setting isn't off. Unset (older saved preferences) means the default, "fast".
+ */
+export function runSpeed(pref: TransitionSpeed | undefined, phoneLayout: boolean, reducedMotion: boolean): RunSpeed | null {
+  if (pref === 'off' || !phoneLayout || reducedMotion) return null;
+  return pref ?? 'fast';
 }
