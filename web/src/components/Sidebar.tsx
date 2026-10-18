@@ -1,4 +1,5 @@
 import {
+  AlarmClock,
   Archive,
   ChevronDown,
   ChevronLeft,
@@ -30,8 +31,9 @@ const SPECIAL_ICON: Record<SpecialUse, ReactNode> = {
   junk: <ShieldAlert size={16} />,
   all: <Layers size={16} />,
   flagged: <Star size={16} />,
+  snoozed: <AlarmClock size={16} />,
 };
-const SPECIAL_ORDER: SpecialUse[] = ['inbox', 'drafts', 'sent', 'archive', 'junk', 'trash'];
+const SPECIAL_ORDER: SpecialUse[] = ['inbox', 'snoozed', 'drafts', 'sent', 'archive', 'junk', 'trash'];
 
 function sortFolders(folders: FolderView[]): FolderView[] {
   const rank = (f: FolderView) => {
@@ -110,7 +112,7 @@ export function Sidebar({ accounts, folders, sel, onSelect, onCompose, onAccount
                   {af &&
                     sortFolders(af.folders).map((f) => {
                       const active = sel.accountId === acc.id && sel.folder === f.path;
-                      const showCount = f.unread && f.specialUse !== 'sent' && f.specialUse !== 'drafts' && f.specialUse !== 'trash';
+                      const showCount = f.unread && f.specialUse !== 'sent' && f.specialUse !== 'drafts' && f.specialUse !== 'trash' && f.specialUse !== 'snoozed';
                       return (
                         <button
                           key={f.path}

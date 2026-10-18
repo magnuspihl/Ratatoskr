@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import type { PushSubscriptionInput } from '../../../shared/types.js';
+import type { NotificationContent, PushSubscriptionInput } from '../../../shared/types.js';
 import type { Store } from '../db.js';
-import { buildNotification, type NewMail, type NotificationPayload } from './notify.js';
+import { buildNotification, buildSnoozeNotification, type NewMail, type NotificationPayload, type WokenMail } from './notify.js';
 import { assertPublicHost } from '../net/ssrf.js';
 import { checkPushEndpoint, MAX_PAYLOAD_BYTES, PushEndpointError, type PushTransport } from './webpush.js';
 
@@ -50,17 +50,30 @@ export interface PushServiceOptions {
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
-/** Turns new INBOX mail into Web Push notifications on every device the user enabled. */
+/** Turns new INBOX mail (and snoozed mail coming back) into Web Push notifications on every device the user enabled. */
 export class PushService {
   constructor(private readonly opts: PushServiceOptions) {}
 
   async notifyNewMail(userId: string, accountId: string, messages: NewMail[]) {
+    await this.notify(userId, accountId, (account, content) => buildNotification(account, messages, content));
+  }
+
+  /** Snoozed messages are back in the inbox. */
+  async notifySnoozeEnded(userId: string, accountId: string, messages: WokenMail[]) {
+    await this.notify(userId, accountId, (account, content) => buildSnoozeNotification(account, messages, content));
+  }
+
+  private async notify(
+    userId: string,
+    accountId: string,
+    build: (account: { id: string; name: string }, content: NotificationContent) => NotificationPayload | null,
+  ) {
     const { store } = this.opts;
-    if (messages.length === 0 || this.opts.isUserActive(userId)) return;
+    if (this.opts.isUserActive(userId)) return;
     const user = store.getUser(userId);
     const account = store.listAccounts(userId).find((a) => a.id === accountId);
     if (!user || !account) return;
-    const payload = buildNotification(account, messages, user.preferences.notificationContent);
+    const payload = build(account, user.preferences.notificationContent);
     if (!payload) return;
     const badge = await this.opts.unreadCount?.(userId).catch(() => null);
     await this.send(userId, typeof badge === 'number' ? { ...payload, badge } : payload, 24 * 3600);

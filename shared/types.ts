@@ -24,7 +24,7 @@ export interface AccountView {
   appendSent: boolean;
 }
 
-export type SpecialUse = 'inbox' | 'sent' | 'drafts' | 'trash' | 'archive' | 'junk' | 'all' | 'flagged';
+export type SpecialUse = 'inbox' | 'sent' | 'drafts' | 'trash' | 'archive' | 'junk' | 'all' | 'flagged' | 'snoozed';
 
 export interface FolderView {
   path: string;
@@ -65,6 +65,8 @@ export interface MessageSummary {
   draft: boolean;
   hasAttachments: boolean;
   size: number;
+  /** ISO time the message returns to the inbox, while it waits in the Snoozed folder. */
+  snoozedUntil?: string;
 }
 
 /** Per-account position in a mailbox stream. */
@@ -129,6 +131,8 @@ export interface MessageDetail {
   /** The sender is allowlisted, but the message failed DMARC so images were not loaded automatically. */
   allowlistSkipped: 'dmarc-fail' | null;
   attachments: AttachmentView[];
+  /** ISO time the message returns to the inbox, while it waits in the Snoozed folder. */
+  snoozedUntil?: string;
 }
 
 /** A domain in its stored ASCII (punycode) form and its human-readable form. */
@@ -142,7 +146,11 @@ export type MessageAction =
   | { type: 'flagged'; value: boolean }
   | { type: 'move'; destination: string }
   | { type: 'archive' }
-  | { type: 'delete' };
+  | { type: 'delete' }
+  /** Move to the Snoozed folder until `until` (ISO time), then back to the inbox. Again on a snoozed message: change the time. */
+  | { type: 'snooze'; until: string }
+  /** Back to the inbox right away. */
+  | { type: 'unsnooze' };
 
 /** Where moved messages ended up, so the move can be undone by moving them back. */
 export interface UndoInfo {
@@ -225,6 +233,8 @@ export interface Me {
 export type ServerEvent =
   | { type: 'mailbox'; accountId: string; folder: string }
   | { type: 'reset'; accountId: string; folder: string }
+  /** A snoozed message is back in the inbox (uid is null if the server couldn't tell). */
+  | { type: 'snoozeEnded'; accountId: string; uidValidity: string; uid: number | null; from: string; subject: string }
   | { type: 'hello' };
 
 /**

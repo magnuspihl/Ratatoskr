@@ -10,13 +10,14 @@ import { MessageList } from './components/MessageList';
 import { quotableDetail, Reader, type ReplyKind } from './components/Reader';
 import { SettingsDialog } from './components/SettingsDialog';
 import { Sidebar } from './components/Sidebar';
-import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts } from './hooks';
+import { useAccounts, useFolders, useLiveUpdates, useMe, useMessageAction, useMessages, useTheme, useToasts, type SnoozeEndedEvent } from './hooks';
 import { blankComposer, composerFor } from './replies';
 import { useRouter, type Location } from './router';
 import { disablePush, notificationTarget, registerServiceWorker, setAppBadge, syncPush } from './push';
 import { HOME, listRoute, openMessageFolder, parseLocation, viewKey, type Route } from './routing';
 import { updateSticky, withSticky } from './sticky';
 import { removesFromList, swipeToAction, type Direction, type UndoStep } from './swipe';
+import { formatSnoozeTime } from './snooze';
 import { refKey, toRef } from './util';
 
 type MobileView = 'nav' | 'list' | 'reader';
@@ -35,6 +36,7 @@ export function App() {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [composer, setComposer] = useState<ComposerInit | null>(null);
   const [lastOpenKey, setLastOpenKey] = useState<string | null>(null);
+  const [snoozeSignal, setSnoozeSignal] = useState(0);
   const composerDirty = useRef(false);
   /** Entries pushed while the (non-modal) composer stayed open on top of them. */
   const composeNavs = useRef(0);
@@ -106,7 +108,16 @@ export function App() {
   }, [currentView, messages]);
   const listErrors = messagesQ.data?.pages.at(-1)?.errors ?? [];
 
-  useLiveUpdates(loggedIn && accounts.length > 0);
+  // A snoozed message is back: say so while the app is open (phones get a notification instead).
+  const onSnoozeEnded = useCallback(
+    (ev: SnoozeEndedEvent) => {
+      const text = `Back from snooze: ${ev.subject || '(no subject)'}${ev.from ? ` (${ev.from})` : ''}`;
+      const target = ev.uid && ev.uidValidity ? { accountId: ev.accountId, uidValidity: ev.uidValidity, uid: ev.uid } : null;
+      push(text, false, target ? { label: 'Open', run: () => go({ ...HOME, open: target }) } : undefined);
+    },
+    [push, go],
+  );
+  useLiveUpdates(loggedIn && accounts.length > 0, onSnoozeEnded);
 
   // Notifications: register the service worker, keep this device's subscription current, and
   // follow taps on a notification while the app is already open.
@@ -153,6 +164,7 @@ export function App() {
   const currentFolders = effectiveSel.accountId ? folders.data?.find((f) => f.accountId === effectiveSel.accountId) : undefined;
   const folderInfo = currentFolders?.folders.find((f) => f.path === effectiveSel.folder);
   const isSentLike = folderInfo?.specialUse === 'sent' || folderInfo?.specialUse === 'drafts';
+  const inSnoozed = folderInfo?.specialUse === 'snoozed';
 
   const title = effectiveSel.accountId
     ? `${folderInfo?.specialUse === 'inbox' ? 'Inbox' : (folderInfo?.name ?? effectiveSel.folder)}${accounts.length > 1 ? ` · ${accountMap.get(effectiveSel.accountId)?.name ?? ''}` : ''}`
@@ -183,7 +195,8 @@ export function App() {
 
   const act = useCallback(
     async (refs: MessageRef[], action: MessageAction) => {
-      const removes = removesFromList(action);
+      // Snoozing again from the Snoozed folder only changes the time; the message stays.
+      const removes = removesFromList(action) && !(action.type === 'snooze' && inSnoozed);
       if (removes && open && refs.some((r) => refKey(r) === refKey(open))) {
         const next = neighbour(open, 1);
         if (next && !refs.some((r) => refKey(r) === refKey(next))) setOpenRef(toRef(next));
@@ -200,15 +213,17 @@ export function App() {
       const what = n === 1 ? 'Message' : `${n} messages`;
       const label =
         action.type === 'archive' ? `${what} archived` : action.type === 'delete' ? (res.result?.permanent ? `${what} deleted permanently` : `${what} moved to Trash`)
-          : action.type === 'move' ? `${what} moved to ${action.destination}` : null;
-      for (const f of res.result?.createdFolders ?? []) push(`Created folder "${f}" for archived mail.`);
+          : action.type === 'move' ? `${what} moved to ${action.destination}`
+          : action.type === 'snooze' ? `${what} snoozed until ${formatSnoozeTime(action.until)}`
+          : action.type === 'unsnooze' ? `${what} back in the inbox` : null;
+      for (const f of res.result?.createdFolders ?? []) push(`Created folder "${f}" for ${action.type === 'snooze' ? 'snoozed' : 'archived'} mail.`);
       const undo = res.undo;
       if (label) push(label, false, undo ? { label: 'Undo', run: () => void runUndo(undo) } : undefined);
       else if (undo && refs.length > 1) push(`${what} updated`, false, { label: 'Undo', run: () => void runUndo(undo) });
       return undo;
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [open, neighbour, runAction, runUndo, route, back, push],
+    [open, neighbour, runAction, runUndo, route, back, push, inSnoozed],
   );
 
   /** Swipe actions: same as toolbar actions, with an undo toast for read/flag toggles too. */
@@ -295,6 +310,9 @@ export function App() {
           break;
         case 'e':
           if (open) void act([open], { type: 'archive' });
+          break;
+        case 'b':
+          if (open) setSnoozeSignal((n) => n + 1);
           break;
         case '#':
         case 'Delete':
@@ -434,6 +452,7 @@ export function App() {
         theme={theme}
         markReadOnOpen={me.data!.preferences.markReadOnOpen}
         onAction={(refs, a) => void act(refs, a)}
+        snoozeSignal={snoozeSignal}
         onReply={reply}
         onBack={() => back(listRoute(route))}
         onGone={onGone}

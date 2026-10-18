@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import {
+  AlarmClock,
   Archive,
   ArrowLeft,
   Download,
@@ -24,6 +25,8 @@ import type { ResolvedTheme } from '../hooks';
 import { avatarColor, displayName, formatFullDate, formatSize, initials, refKey } from '../util';
 import { MessageFrame } from './MessageFrame';
 import { MoveMenu } from './MoveMenu';
+import { SnoozeMenu } from './SnoozeMenu';
+import { formatSnoozeTime } from '../snooze';
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]]/g;
 
@@ -75,13 +78,15 @@ interface Props {
   theme: ResolvedTheme;
   markReadOnOpen: boolean;
   onAction: (refs: MessageRef[], action: MessageAction) => void;
+  /** Opens the snooze menu whenever it changes (keyboard shortcut). */
+  snoozeSignal: number;
   onReply: (kind: ReplyKind, detail: MessageDetail) => void;
   onBack: () => void;
   /** The message is gone (404) or its folder's UIDVALIDITY changed (stale). */
   onGone: (stale: boolean) => void;
 }
 
-export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnOpen, onAction, onReply, onBack, onGone }: Props) {
+export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnOpen, onAction, snoozeSignal, onReply, onBack, onGone }: Props) {
   const key = openRef ? refKey(openRef) : '';
   const [remote, setRemote] = useState(false);
   const [modeOverride, setModeOverride] = useState<'dark' | 'paper' | null>(null);
@@ -129,7 +134,7 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
             <Mail size={44} />
             <div style={{ marginTop: 8 }}>Select a message to read</div>
             <div className="kbd" style={{ marginTop: 4 }}>
-              j / k to move · r reply · e archive · # delete
+              j / k to move · r reply · e archive · b snooze · # delete
             </div>
           </div>
         </div>
@@ -192,6 +197,7 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
         <button className="icon-btn" title="Archive (e)" onClick={() => onAction([ref], { type: 'archive' })}>
           <Archive size={17} />
         </button>
+        <SnoozeMenu iconSize={17} openSignal={snoozeSignal} onSnooze={(until) => onAction([ref], { type: 'snooze', until: until.toISOString() })} />
         <MoveMenu account={folders} exclude={ref.folder} icon={<FolderInput size={17} />} onMove={(destination) => onAction([ref], { type: 'move', destination })} />
         <button className="icon-btn" title="Delete (#)" onClick={() => onAction([ref], { type: 'delete' })}>
           <Trash2 size={17} />
@@ -225,6 +231,18 @@ export function Reader({ openRef, account, folders, isDrafts, theme, markReadOnO
               </div>
               <div className="msg-date">{formatFullDate(d.date)}</div>
             </div>
+
+            {d.snoozedUntil && (
+              <div className="notice">
+                <AlarmClock size={16} />
+                <span className="grow">
+                  Snoozed until {formatSnoozeTime(d.snoozedUntil)}. It will come back to the inbox then.
+                </span>
+                <button className="btn" onClick={() => onAction([ref], { type: 'unsnooze' })}>
+                  Unsnooze
+                </button>
+              </div>
+            )}
 
             {d.html && (d.remoteContentBlocked > 0 || d.imagesAllowedBy || theme === 'dark' || d.text) && (
               <div className="notice">

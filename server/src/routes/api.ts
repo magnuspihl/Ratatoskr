@@ -10,6 +10,7 @@ import { RemoteImageCache, type RemoteImage } from '../net/remoteImages.js';
 import { displayDomain, MAX_ALLOWED_DOMAINS, normaliseDomain } from '../mail/imageAllowlist.js';
 import type { Sessions } from '../auth/session.js';
 import { ComposeError, type ComposeService } from '../mail/send.js';
+import { SnoozeError, type SnoozeService } from '../mail/snooze.js';
 import { PushSubscriptionError, validateSubscription, type PushService } from '../push/service.js';
 
 declare module 'fastify' {
@@ -57,6 +58,8 @@ const actionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('move'), destination: z.string().min(1).max(1000) }),
   z.object({ type: z.literal('archive') }),
   z.object({ type: z.literal('delete') }),
+  z.object({ type: z.literal('snooze'), until: z.string().max(64) }),
+  z.object({ type: z.literal('unsnooze') }),
 ]);
 
 const swipe = z.enum(['none', 'delete', 'archive', 'toggleRead', 'toggleFlag']);
@@ -96,7 +99,7 @@ function sendError(reply: FastifyReply, err: unknown) {
   }
   if (err instanceof NotFoundError || err instanceof MessageGoneError) return reply.code(404).send({ error: err.message });
   if (err instanceof StaleError) return reply.code(409).send({ error: err.message, stale: true });
-  if (err instanceof ComposeError || err instanceof PushSubscriptionError) return reply.code(400).send({ error: err.message });
+  if (err instanceof ComposeError || err instanceof PushSubscriptionError || err instanceof SnoozeError) return reply.code(400).send({ error: err.message });
   if (err instanceof MailServerError) return reply.code(502).send({ error: err.message });
   reply.log.error({ err }, 'request failed');
   return reply.code(500).send({ error: 'Internal error' });
@@ -115,6 +118,7 @@ export interface ApiDeps {
   mail: MailService;
   compose: ComposeService;
   push: PushService;
+  snooze: SnoozeService;
   /** VAPID public key, the browser's applicationServerKey. */
   vapidPublicKey: string;
   /** Replaces the DNS check of push service hosts (tests only). */
@@ -124,7 +128,7 @@ export interface ApiDeps {
 }
 
 export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
-  const { config, store, sessions, pool, mail, compose, push, vapidPublicKey, pushHostCheck, fetchImage } = deps;
+  const { config, store, sessions, pool, mail, compose, push, snooze, vapidPublicKey, pushHostCheck, fetchImage } = deps;
 
   app.decorateRequest('user', null);
 
@@ -149,6 +153,17 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
   };
   // Fetched remote images, shared across requests (per-user keys, short TTL, size-capped).
   const imageCache = new RemoteImageCache();
+  /** When a message in a Snoozed folder comes back, as an ISO time (undefined if not snoozed). */
+  const snoozedUntil = (userId: string) => {
+    const cache = new Map<string, Map<number, number>>();
+    return (m: MessageRef): string | undefined => {
+      const k = `${m.accountId}\u0000${m.folder}\u0000${m.uidValidity}`;
+      let byUid = cache.get(k);
+      if (!byUid) cache.set(k, (byUid = store.snoozesIn(userId, m.accountId, m.folder, m.uidValidity)));
+      const t = byUid.get(m.uid);
+      return t === undefined ? undefined : new Date(t).toISOString();
+    };
+  };
 
   // ---- me / preferences -----------------------------------------------------
 
@@ -320,7 +335,13 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
         sources = store.listAccounts(userId).map((a) => ({ accountId: a.id, folder: 'INBOX' }));
       }
       const limit = q.limit ?? req.user!.preferences.pageSize;
-      return await mail.listMessages(userId, sources, q.cursor ?? null, limit, { text: q.q ?? '', unread: q.unread === '1' });
+      const list = await mail.listMessages(userId, sources, q.cursor ?? null, limit, { text: q.q ?? '', unread: q.unread === '1' });
+      const until = snoozedUntil(userId);
+      for (const m of list.messages) {
+        const t = until(m);
+        if (t) m.snoozedUntil = t;
+      }
+      return list;
     } catch (err) {
       return sendError(reply, err);
     }
@@ -341,6 +362,8 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
         fetchImage,
         maxBytes: config.maxMessageBytes,
       });
+      const until = snoozedUntil(uid(req))(q);
+      if (until) detail.snoozedUntil = until;
       reply.header('cache-control', 'private, no-store');
       return detail;
     } catch (err) {
@@ -380,8 +403,18 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
         groups.set(k, g);
       }
       const result: ActionResult = { undo: [], permanent: false, createdFolders: [] };
+      const action = body.action;
       for (const { ref, uids } of groups.values()) {
-        const r = await mail.applyAction(userId, ref.accountId, ref.folder, ref.uidValidity, uids, body.action);
+        let r;
+        if (action.type === 'snooze') r = await snooze.snooze(userId, ref, uids, action.until);
+        else if (action.type === 'unsnooze') r = await snooze.unsnooze(userId, ref, uids);
+        else {
+          r = await mail.applyAction(userId, ref.accountId, ref.folder, ref.uidValidity, uids, action);
+          // Snoozed messages moved or deleted by hand no longer come back on their own.
+          if (action.type === 'move' || action.type === 'archive' || action.type === 'delete') {
+            store.deleteSnoozes(userId, ref.accountId, ref.folder, ref.uidValidity, uids);
+          }
+        }
         if (r.undo) result.undo.push(r.undo);
         if (r.permanent) result.permanent = true;
         if (r.createdFolder) result.createdFolders.push(r.createdFolder);
