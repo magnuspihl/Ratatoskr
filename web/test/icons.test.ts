@@ -84,6 +84,48 @@ describe('app icons', () => {
     expect(opaque).toBeGreaterThan(500);
   });
 
+  it('the icons draw the squirrel in the app accent orange on its pale accent tint, against a dark trunk', () => {
+    const css = fs.readFileSync(path.resolve(import.meta.dirname, '../src/styles.css'), 'utf8');
+    const token = (name: string) => css.match(new RegExp(`--${name}: (#[0-9a-f]{6});`))![1]!;
+    for (const file of ['favicon.svg', '../icons-src/icon.svg', '../icons-src/full-bleed.svg']) {
+      const svg = read(file).toString('utf8');
+      expect(svg).toMatch(new RegExp(`<path d="[^"]+" fill="${token('accent-fill')}"/>`));
+      expect(svg).toContain(`fill="${token('accent-soft')}"`);
+      expect(svg).toContain('fill="#3a1d10"');
+    }
+    expect(manifest).toMatchObject({ background_color: token('accent-soft') });
+  });
+
+  it('the maskable icon shows the orange squirrel, the dark trunk and the pale background', () => {
+    const { width, px } = decodePng(read('icons/icon-maskable-512.png'));
+    const rgb = (x: number, y: number) => [...px.subarray((y * width + x) * 4, (y * width + x) * 4 + 3)];
+    expect(rgb(60, 256)).toEqual([0x3a, 0x1d, 0x10]);
+    expect(rgb(480, 256)).toEqual([0xfd, 0xee, 0xe6]);
+    expect(rgb(260, 300)).toEqual([0xc2, 0x41, 0x0c]);
+  });
+
+  it('no light seam shows where the trunk meets the icon border', () => {
+    const { width, px } = decodePng(read('icons/icon-512.png'));
+    const at = (x: number, y: number) => [...px.subarray((y * width + x) * 4, (y * width + x) * 4 + 4)];
+    // Down the trunk column from the top edge, and across the trunk at the bottom: every opaque pixel is bark.
+    const probes = [...Array.from({ length: 120 }, (_, y) => [120, y]), ...Array.from({ length: 120 }, (_, i) => [120, 511 - i])];
+    for (const [x, y] of probes) {
+      const [r, g, b, a] = at(x!, y!);
+      if (a === 255) expect([r, g, b]).toEqual([0x3a, 0x1d, 0x10]);
+    }
+  });
+
+  it('the animated squirrel and the Compose button use the icon orange in both light and dark themes', () => {
+    const css = fs.readFileSync(path.resolve(import.meta.dirname, '../src/styles.css'), 'utf8');
+    const dark = css.slice(css.indexOf("[data-theme='dark']"), css.indexOf('}', css.indexOf("[data-theme='dark']")));
+    expect(css.match(/--accent-fill:[^;]*;/g)).toEqual(['--accent-fill: #c2410c;']);
+    expect(css.match(/--squirrel:[^;]*;/g)).toEqual(['--squirrel: var(--accent-fill);']);
+    expect(css).toMatch(/\.btn\.primary \{ background: var\(--accent-fill\);/);
+    // White label on the dark orange, in both themes.
+    expect(css.match(/--accent-text:[^;]*;/g)).toEqual(['--accent-text: #ffffff;']);
+    expect(dark).not.toContain('--accent-fill');
+  });
+
   it('the favicon is the squirrel icon, not the old envelope', () => {
     const svg = read('favicon.svg').toString('utf8');
     expect(svg).toContain('<title>Ratatoskr</title>');
