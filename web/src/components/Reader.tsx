@@ -21,7 +21,8 @@ import type { ConversationRow } from '../../../shared/threads';
 import type { AccountFolders, AccountView, DomainName, MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../../shared/types';
 import { api, ApiError } from '../api';
 import type { ResolvedTheme } from '../hooks';
-import { avatarColor, displayName, formatFullDate, formatListDate, formatSize, initials, refKey, toRef } from '../util';
+import { displayName, formatFullDate, formatListDate, formatSize, refKey, toRef } from '../util';
+import { Avatar } from './Avatar';
 import { MessageFrame } from './MessageFrame';
 import { MoveMenu } from './MoveMenu';
 import { SnoozeMenu } from './SnoozeMenu';
@@ -96,6 +97,8 @@ interface Props {
   isDrafts: boolean;
   theme: ResolvedTheme;
   markReadOnOpen: boolean;
+  /** Show senders' pictures instead of only their initials. */
+  contactPhotos: boolean;
   onAction: (refs: MessageRef[], action: MessageAction) => void;
   /** Opens the snooze menu whenever it changes (keyboard shortcut). */
   snoozeSignal: number;
@@ -109,7 +112,7 @@ interface Props {
 
 const retry = (n: number, err: Error) => !(err instanceof ApiError && err.status < 500) && n < 1;
 
-export function Reader({ openRef, conversation, account, multipleAccounts, folders, isDrafts, theme, markReadOnOpen, onAction, snoozeSignal, onReply, onMailto, onBack, onGone }: Props) {
+export function Reader({ openRef, conversation, account, multipleAccounts, folders, isDrafts, theme, markReadOnOpen, contactPhotos, onAction, snoozeSignal, onReply, onMailto, onBack, onGone }: Props) {
   const key = openRef ? refKey(openRef) : '';
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -259,6 +262,7 @@ export function Reader({ openRef, conversation, account, multipleAccounts, folde
               account={account}
               multipleAccounts={multipleAccounts}
               theme={theme}
+              contactPhotos={contactPhotos}
               busy={busy}
               onAllowDomain={(domain) => void changeAllowlist(() => api.addImageDomain(domain))}
               onAction={onAction}
@@ -281,6 +285,7 @@ function MessageCard({
   account,
   multipleAccounts,
   theme,
+  contactPhotos,
   busy,
   onAllowDomain,
   onAction,
@@ -295,6 +300,7 @@ function MessageCard({
   account: AccountView | undefined;
   multipleAccounts: boolean;
   theme: ResolvedTheme;
+  contactPhotos: boolean;
   busy: boolean;
   onAllowDomain: (domain: string) => void;
   onAction: (refs: MessageRef[], action: MessageAction) => void;
@@ -329,9 +335,7 @@ function MessageCard({
     const from = summary.from[0];
     return (
       <button className="msg-card msg-collapsed" onClick={onToggle} title="Show this message">
-        <span className="avatar small" style={{ background: avatarColor(from?.address ?? '') }}>
-          {initials(from)}
-        </span>
+        <Avatar address={from} small photos={contactPhotos} />
         <span className="msg-collapsed-from">{displayName(from) || '(unknown sender)'}</span>
         <span className="msg-collapsed-snippet">{summary.snippet}</span>
         <span className="msg-date">{formatListDate(summary.date)}</span>
@@ -377,9 +381,7 @@ function MessageCard({
         <>
           {/* In a conversation, clicking the header folds the message away again. */}
           <div className={`msg-head ${headOpen ? 'open' : ''} ${onToggle ? 'foldable' : ''}`} onClick={onToggle}>
-            <div className="avatar" style={{ background: avatarColor(d.from[0]?.address ?? '') }}>
-              {initials(d.from[0])}
-            </div>
+            <Avatar address={d.from[0]} photos={contactPhotos} />
             <div className="msg-meta">
               {/* On phones the addresses and recipients fold away; tapping the sender shows them. */}
               <div className="msg-from">

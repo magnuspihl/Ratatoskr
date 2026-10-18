@@ -103,6 +103,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   swipeRight: 'archive',
   notificationContent: 'full',
   screenTransitions: 'fast',
+  contactPhotos: true,
 };
 
 export interface User {

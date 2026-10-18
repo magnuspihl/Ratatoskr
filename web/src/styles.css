@@ -249,7 +249,10 @@ svg { flex-shrink: 0; }
 .reader-toolbar .spacer { flex: 1; }
 .reader-body { flex: 1; overflow-y: auto; padding: 20px 24px 28px; display: flex; flex-direction: column; gap: 14px; }
 .msg-head { display: flex; gap: 12px; align-items: flex-start; }
-.avatar { width: 40px; height: 40px; border-radius: 50%; color: #fff; display: grid; place-items: center; font-weight: 600; font-size: 14px; flex-shrink: 0; }
+.avatar { position: relative; overflow: hidden; width: 40px; height: 40px; border-radius: 50%; color: #fff; display: grid; place-items: center; font-weight: 600; font-size: 14px; flex-shrink: 0; }
+/* The picture covers the initials once it has loaded. */
+.avatar img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #fff; opacity: 0; transition: opacity 0.15s; }
+.avatar img.loaded { opacity: 1; }
 .msg-subject { font-size: 21px; font-weight: 650; letter-spacing: -0.015em; margin: 0 0 2px; line-height: 1.3; word-break: break-word; }
 .msg-count { margin-left: 10px; padding: 1px 7px; border-radius: 999px; background: var(--surface); border: 1px solid var(--border); font-size: 12px; font-weight: 500; color: var(--muted); vertical-align: 3px; letter-spacing: 0; }
 /* A conversation: one card per message, the newest last and filling the remaining height. */

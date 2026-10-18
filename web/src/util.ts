@@ -50,6 +50,13 @@ export function avatarColor(seed: string): string {
   return `hsl(${h} 55% 48%)`;
 }
 
+/** Where the server serves a sender's picture, or null for something that isn't an address. */
+export function avatarUrl(email: string): string | null {
+  const e = email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return null;
+  return `/api/avatar?email=${encodeURIComponent(e)}`;
+}
+
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

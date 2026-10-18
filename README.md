@@ -35,6 +35,10 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
   message, so the sender never sees your IP address. "Always load from example.com" adds the
   sender's domain (and its subdomains) to a per-user list whose mail loads images automatically;
   manage the list in Settings.
+- Contact pictures instead of initials, from Gravatar, Libravatar (including a domain's own
+  federated server) or, for senders at a company rather than a free mail provider, the icon of
+  their website. Like remote images, the server fetches them, so these services never see your
+  IP address or when you read a message. Turn them off in Settings.
 - Mark read/unread, flag, move, archive, delete (to Trash, expunge only from Trash), multi-select.
 - Snooze: hide a message until a date and time you pick (or Later today / Tomorrow / This weekend /
   Next week). See [Snooze](#snooze).

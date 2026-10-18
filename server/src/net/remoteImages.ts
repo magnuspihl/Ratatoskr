@@ -55,7 +55,7 @@ export class RemoteImageError extends Error {
   }
 }
 
-function getOnce(url: URL): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer | null }> {
+function getOnce(url: URL, maxBytes: number): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer | null }> {
   // Node never calls `lookup` for IP-literal hosts, so those must be checked explicitly.
   const literal = url.hostname.replace(/^\[|\]$/g, '');
   if (net.isIP(literal) && !isPublicAddress(literal)) return Promise.reject(new BlockedAddressError(url.hostname));
@@ -80,7 +80,7 @@ function getOnce(url: URL): Promise<{ status: number; headers: http.IncomingHttp
           return resolve({ status, headers: res.headers, body: null });
         }
         const declared = Number(res.headers['content-length'] ?? 0);
-        if (declared > MAX_BYTES) {
+        if (declared > maxBytes) {
           res.destroy();
           return reject(new RemoteImageError('Image too large', 413));
         }
@@ -88,7 +88,7 @@ function getOnce(url: URL): Promise<{ status: number; headers: http.IncomingHttp
         let size = 0;
         res.on('data', (c: Buffer) => {
           size += c.length;
-          if (size > MAX_BYTES) {
+          if (size > maxBytes) {
             res.destroy();
             reject(new RemoteImageError('Image too large', 413));
             return;
@@ -108,12 +108,13 @@ function getOnce(url: URL): Promise<{ status: number; headers: http.IncomingHttp
 }
 
 /** Fetch a remote image without ever touching private/internal addresses. */
-export async function fetchRemoteImage(raw: string): Promise<RemoteImage> {
+export async function fetchRemoteImage(raw: string, opts: { maxBytes?: number } = {}): Promise<RemoteImage> {
+  const maxBytes = Math.min(opts.maxBytes ?? MAX_BYTES, MAX_BYTES);
   const first = fetchableImageUrl(raw);
   if (!first) throw new RemoteImageError('URL not allowed', 400);
   let url: URL = first;
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const res = await getOnce(url);
+    const res = await getOnce(url, maxBytes);
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.location;
       const next: URL | null = loc ? fetchableImageUrl(new URL(loc, url).toString()) : null;

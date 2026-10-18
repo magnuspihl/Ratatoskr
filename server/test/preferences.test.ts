@@ -17,3 +17,13 @@ describe('screen transitions preference', () => {
     expect(prefsSchema.safeParse({ ...base, screenTransitions: false }).success).toBe(false);
   });
 });
+
+describe('contact pictures preference', () => {
+  it('stays on when saved by a client that does not know about it yet', () => {
+    expect(prefsSchema.parse(base).contactPhotos).toBe(true);
+  });
+  it('can be turned off', () => {
+    expect(prefsSchema.parse({ ...base, contactPhotos: false }).contactPhotos).toBe(false);
+    expect(prefsSchema.safeParse({ ...base, contactPhotos: 'no' }).success).toBe(false);
+  });
+});
