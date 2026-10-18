@@ -2,8 +2,9 @@
 // .env of its own, so the main checkout's .env is used as a base. Precedence, highest first: real
 // environment variables, the worktree's .env, the main checkout's .env.
 //
-// Worktrees also share the main checkout's database (its ./data) unless RATATOSKR_DATA_DIR is set
-// somewhere; a relative RATATOSKR_DATA_DIR in the main .env is taken relative to the main checkout.
+// The database is NOT shared: a relative RATATOSKR_DATA_DIR (default ./data) is taken relative to the
+// worktree, so each one has its own. Branches with different migration lists would otherwise
+// corrupt each other's schema.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,13 +31,6 @@ export function devEnvFiles(cwd, main = mainCheckoutDir(cwd)) {
 export function loadDevEnv(cwd, env = process.env, main = mainCheckoutDir(cwd)) {
   const files = devEnvFiles(cwd, main);
   const merged = {};
-  for (const f of files) {
-    const vars = parseEnv(fs.readFileSync(f, 'utf8'));
-    if (main && path.dirname(f) === main && vars.RATATOSKR_DATA_DIR) {
-      vars.RATATOSKR_DATA_DIR = path.resolve(main, vars.RATATOSKR_DATA_DIR);
-    }
-    Object.assign(merged, vars);
-  }
-  if (main && !merged.RATATOSKR_DATA_DIR) merged.RATATOSKR_DATA_DIR = path.join(main, 'data');
+  for (const f of files) Object.assign(merged, parseEnv(fs.readFileSync(f, 'utf8')));
   return { env: { ...merged, ...env }, files };
 }

@@ -51,31 +51,18 @@ describe('dev server environment in git worktrees', () => {
     expect(devEnvFiles(main)).toEqual([path.join(main, '.env')]);
     remove(main);
     remove(worktree);
-    expect(loadDevEnv(worktree, { B: '2' })).toEqual({ env: { B: '2', RATATOSKR_DATA_DIR: path.join(main, 'data') }, files: [] });
+    expect(loadDevEnv(worktree, { B: '2' })).toEqual({ env: { B: '2' }, files: [] });
   });
 
-  it("uses the main checkout's database from a worktree by default", () => {
+  it("never points a worktree at the main checkout's database", () => {
     remove(main);
     remove(worktree);
-    expect(loadDevEnv(worktree, {}).env.RATATOSKR_DATA_DIR).toBe(path.join(main, 'data'));
+    expect(loadDevEnv(worktree, {}).env.RATATOSKR_DATA_DIR).toBeUndefined();
   });
 
-  it("keeps the main checkout's own default database location untouched", () => {
-    remove(main);
-    expect(loadDevEnv(main, {}).env.RATATOSKR_DATA_DIR).toBeUndefined();
-  });
-
-  it("reads a relative data directory in the main .env relative to the main checkout", () => {
+  it("keeps a relative data directory from the main .env relative to the worktree", () => {
     write(main, 'RATATOSKR_DATA_DIR=./var/db\n');
     remove(worktree);
-    expect(loadDevEnv(worktree, {}).env.RATATOSKR_DATA_DIR).toBe(path.join(main, 'var/db'));
-  });
-
-  it('gives a worktree its own database when RATATOSKR_DATA_DIR is set in its .env or the environment', () => {
-    write(main, 'RATATOSKR_DATA_DIR=./var/db\n');
-    write(worktree, 'RATATOSKR_DATA_DIR=./data\n');
-    expect(loadDevEnv(worktree, {}).env.RATATOSKR_DATA_DIR).toBe('./data');
-    remove(worktree);
-    expect(loadDevEnv(worktree, { RATATOSKR_DATA_DIR: '/tmp/elsewhere' }).env.RATATOSKR_DATA_DIR).toBe('/tmp/elsewhere');
+    expect(loadDevEnv(worktree, {}).env.RATATOSKR_DATA_DIR).toBe('./var/db');
   });
 });

@@ -5,7 +5,6 @@ import { loadDevEnv } from './devEnv.mjs';
 
 const loaded = loadDevEnv(process.cwd());
 if (loaded.files.length) console.log(`Using ${loaded.files.join(', ')}`);
-if (loaded.env.RATATOSKR_DATA_DIR) console.log(`Data directory: ${loaded.env.RATATOSKR_DATA_DIR}`);
 const port = Number(loaded.env.PORT || 5173);
 const backendPort = Number(loaded.env.BACKEND_PORT || port + 1);
 const env = { ...loaded.env, BACKEND_PORT: String(backendPort) };
