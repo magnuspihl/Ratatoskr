@@ -25,7 +25,8 @@ let cookie = '';
 let userId = '';
 let account: AccountView;
 const sent: PushRequest[] = [];
-const notifications = () => sent.map((r) => r.payload as NotificationPayload);
+// Shown notifications only, not the "clear" pushes that close them once their message is read or moved.
+const notifications = () => sent.map((r) => r.payload as NotificationPayload).filter((p) => 'title' in p);
 
 async function deliver(subject: string, opts: { date?: Date; flags?: string[] } = {}) {
   const c = new ImapFlow({ host: gm.host, port: gm.imapPort, secure: false, doSTARTTLS: false, auth: { user: DAVE, pass: 'x' }, logger: false });
