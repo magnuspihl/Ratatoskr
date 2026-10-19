@@ -93,7 +93,6 @@ describe('app icons', () => {
       expect(svg).toContain(`fill="${token('accent-soft')}"`);
       expect(svg).toContain('fill="#3a1d10"');
     }
-    expect(manifest).toMatchObject({ background_color: token('accent-soft') });
   });
 
   it('the maskable icon shows the orange squirrel, the dark trunk and the pale background', () => {

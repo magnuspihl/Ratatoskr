@@ -11,9 +11,11 @@ function fakeDoc(count: number) {
 }
 
 describe('Android system bar colours', () => {
-  it('the installed app manifest sets no fixed theme colour, so the navigation bar follows the phone theme', () => {
+  it('the installed app paints its navigation bar and window dark, never a pale colour', () => {
+    // Chrome colours an installed app's navigation bar from the manifest's one theme_color and fills the window
+    // behind it with background_color; neither has a dark-mode variant.
     const manifest = JSON.parse(read('../public/manifest.webmanifest')) as Record<string, unknown>;
-    expect(manifest).not.toHaveProperty('theme_color');
+    expect(manifest).toMatchObject({ theme_color: THEME_COLORS.dark, background_color: THEME_COLORS.dark });
   });
 
   it('the bar colours match the page background of each theme', () => {
