@@ -1,6 +1,6 @@
 // Ratatoskr service worker: phone/desktop notifications only. It deliberately has no fetch handler
 // and caches nothing, so the app stays a thin client that always talks to the server.
-// The payload format is NotificationPayload in server/src/push/notify.ts.
+// The payload formats are NotificationPayload and ClearPayload in server/src/push/notify.ts.
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
@@ -21,6 +21,22 @@ self.addEventListener('push', (event) => {
   } catch {
     /* show a generic notification below */
   }
+  const setBadge = async () => {
+    if (typeof data.badge === 'number' && 'setAppBadge' in self.navigator) {
+      await (data.badge > 0 ? self.navigator.setAppBadge(data.badge) : self.navigator.clearAppBadge()).catch(() => {});
+    }
+  };
+  // The mail was read (or moved away) elsewhere: close its notifications (ClearPayload).
+  if (data.type === 'clear') {
+    const tags = new Set(Array.isArray(data.tags) ? data.tags : []);
+    event.waitUntil(
+      (async () => {
+        for (const n of await self.registration.getNotifications()) if (tags.has(n.tag)) n.close();
+        await setBadge();
+      })(),
+    );
+    return;
+  }
   const title = typeof data.title === 'string' && data.title ? data.title : 'New mail';
   event.waitUntil(
     (async () => {
@@ -32,9 +48,7 @@ self.addEventListener('push', (event) => {
         badge: '/icons/badge-96.png',
         data: { url: sameOriginPath(data.url || '/') },
       });
-      if (typeof data.badge === 'number' && 'setAppBadge' in self.navigator) {
-        await (data.badge > 0 ? self.navigator.setAppBadge(data.badge) : self.navigator.clearAppBadge()).catch(() => {});
-      }
+      await setBadge();
     })(),
   );
 });

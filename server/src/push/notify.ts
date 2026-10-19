@@ -30,6 +30,16 @@ export interface NotificationPayload {
   badge?: number;
 }
 
+/**
+ * Tells the service worker to close notifications (by tag) whose messages have all been read or
+ * have left the inbox, on another device or in another mail client.
+ */
+export interface ClearPayload {
+  type: 'clear';
+  tags: string[];
+  badge?: number;
+}
+
 const MAX_FIELD = 200;
 const MAX_LINES = 5;
 

@@ -49,6 +49,8 @@ export class ImapPool {
   private readonly sweeper: NodeJS.Timeout;
   onEvent: (userId: string, event: ServerEvent) => void = () => {};
   onNewMail: (userId: string, accountId: string, messages: NewMail[]) => void = () => {};
+  /** Flags changed or messages left INBOX (also called after reconnecting, since changes may have been missed). */
+  onInboxChanged: (userId: string, accountId: string) => void = () => {};
 
   constructor(
     private readonly store: Store,
@@ -272,6 +274,7 @@ export class ImapPool {
       const uv = mailbox.uidValidity.toString();
       if (w.uidValidity !== null && w.uidValidity !== uv) emit({ type: 'reset', accountId, folder });
       else if (w.uidValidity !== null) emit({ type: 'mailbox', accountId, folder }); // catch up after reconnect
+      if (w.uidValidity !== null) this.onInboxChanged(userId, accountId);
       w.uidValidity = uv;
       w.backoffMs = 5_000;
       // Also reports mail that arrived while disconnected (or while the server was down).
@@ -281,8 +284,12 @@ export class ImapPool {
         changed();
         if (this.background.has(userId)) this.checkNewMail(userId, accountId, w, client);
       });
-      client.on('expunge', changed);
-      client.on('flags', changed);
+      const inboxChanged = () => {
+        changed();
+        this.onInboxChanged(userId, accountId);
+      };
+      client.on('expunge', inboxChanged);
+      client.on('flags', inboxChanged);
       client.on('close', () => {
         if (w.client === client) w.client = null;
         this.scheduleWatcher(userId, accountId, w);

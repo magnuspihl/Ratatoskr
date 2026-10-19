@@ -134,6 +134,20 @@ describe('phone notifications for new mail', () => {
     expect(titles()).not.toContain('Read elsewhere');
   });
 
+  it('closes the notification on the phone once the message is read in another mail client', async () => {
+    const shown = sent.find((r) => (r.payload as NotificationPayload).body === 'Still unread')!.payload as NotificationPayload;
+    const uid = Number(shown.tag.split(':').pop());
+    sent.length = 0;
+    const c = imapClient(CAROL);
+    await c.connect();
+    await c.mailboxOpen('INBOX');
+    await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+    await c.logout();
+    expect(await until(() => sent.length > 0)).toBe(true);
+    expect(sent[0]!.payload).toMatchObject({ type: 'clear', tags: [shown.tag] });
+    expect(sent[0]!.subscription.endpoint).toBe(phone.endpoint);
+  });
+
   it('sends a test notification to the device', async () => {
     sent.length = 0;
     expect((await api<{ delivered: number }>('POST', '/api/push/test')).json).toEqual({ delivered: 1 });

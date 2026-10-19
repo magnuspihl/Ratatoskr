@@ -172,8 +172,16 @@ What you get:
 - Users choose whether notifications show **sender and subject** or only "New message" and the
   account name. The payload is end-to-end encrypted to the device (RFC 8291), but it does pass
   through Apple's, Google's or Mozilla's push service.
+- Notifications close themselves on all your devices once their messages are read or moved out of
+  the inbox, in Ratatoskr or in any other mail client (within the 24 hours a notification is
+  kept, and not across a server restart). Not on iPhone and iPad: Apple revokes notifications for
+  sites that send pushes which show nothing.
 - The app icon shows the number of unread messages across all inboxes, where the platform
   supports badges.
+- On Android, the notification header shows the browser's icon and name unless the browser
+  installs the app as a real Android app (a "WebAPK", as Chrome does). Browsers such
+  as Vivaldi add a home screen shortcut instead, so their notifications are attributed to
+  the browser; the squirrel still appears in the status bar and as the notification's picture.
 
 How it works: while a user has notifications on at least one device, the server keeps one IMAP
 IDLE connection per account open on INBOX, even when no browser is open. Mind your provider's

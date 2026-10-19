@@ -255,6 +255,108 @@ describe('sending new-mail notifications', () => {
   });
 });
 
+describe('clearing notifications when the mail is read elsewhere', () => {
+  /** `unread` is what the IMAP server says is still unread in INBOX (UIDVALIDITY 42). */
+  function setup(opts: { unread?: Set<number>; badge?: number } = {}) {
+    const s = store();
+    const user = s.upsertUser('iss', 'u', '', '');
+    const acc = s.createAccount(user.id, accountInput);
+    const sent: PushRequest[] = [];
+    const state = { unread: opts.unread ?? new Set<number>(), checks: 0 };
+    const push = new PushService({
+      store: s,
+      transport: async (r) => (sent.push(r), 'sent'),
+      isUserActive: () => false,
+      onNoSubscriptions: () => {},
+      unreadCount: async () => opts.badge ?? null,
+      unreadInInbox: async (_u, _a, uidValidity, uids) => {
+        state.checks++;
+        return uidValidity === '42' ? new Set(uids.filter((u) => state.unread.has(u))) : new Set();
+      },
+      clearDelayMs: 10,
+    });
+    s.addPushSubscription(user.id, sub('phone'));
+    const clears = () => sent.filter((r) => (r.payload as { type?: string }).type === 'clear').map((r) => r.payload);
+    return { s, user, acc, sent, state, push, clears };
+  }
+
+  it('closes the notification on every device once its message is read, with the new badge count', async () => {
+    const { user, acc, push, state, clears, sent } = setup({ unread: new Set([5]), badge: 0 });
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    state.unread.delete(5);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toEqual([{ type: 'clear', tags: [`${acc.id}:5`], badge: 0 }]);
+    // Pushes that show nothing go out at normal priority.
+    expect(sent.at(-1)!.urgency).toBe('normal');
+  });
+
+  it('sends nothing while the message is still unread', async () => {
+    const { user, acc, push, clears } = setup({ unread: new Set([5]) });
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toEqual([]);
+  });
+
+  it('closes a summary notification only after every message in it is read', async () => {
+    const { user, acc, push, state, clears } = setup({ unread: new Set([1, 2]) });
+    await push.notifyNewMail(user.id, acc.id, [mail(1, 'Alice', 'One'), mail(2, 'Bob', 'Two')]);
+    state.unread.delete(1);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toEqual([]);
+    state.unread.delete(2);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toEqual([{ type: 'clear', tags: [`${acc.id}:batch`] }]);
+  });
+
+  it('clears each notification only once', async () => {
+    const { user, acc, push, clears } = setup();
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    await push.clearRead(user.id, acc.id);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toHaveLength(1);
+  });
+
+  it('does not ask the mail server anything when no notification is showing', async () => {
+    const { user, acc, push, state } = setup();
+    push.inboxChanged(user.id, acc.id);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(state.checks).toBe(0);
+  });
+
+  it('checks once after a burst of inbox changes', async () => {
+    const { user, acc, push, state, clears } = setup();
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    for (let i = 0; i < 5; i++) push.inboxChanged(user.id, acc.id);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(state.checks).toBe(1);
+    expect(clears()).toHaveLength(1);
+  });
+
+  it('never sends a clear message to Apple devices, which would revoke the subscription', async () => {
+    const { s, user, acc, push, sent } = setup();
+    s.addPushSubscription(user.id, { ...sub('iphone'), endpoint: 'https://web.push.apple.com/iphone' });
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    sent.length = 0;
+    await push.clearRead(user.id, acc.id);
+    expect(sent.map((r) => r.subscription.endpoint)).toEqual(['https://fcm.googleapis.com/fcm/send/phone']);
+  });
+
+  it('closes a back-from-snooze notification once that message is read', async () => {
+    const { user, acc, push, clears } = setup();
+    await push.notifySnoozeEnded(user.id, acc.id, [{ uid: 9, uidValidity: '42', from: null, subject: 'Later' }]);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toEqual([{ type: 'clear', tags: [`${acc.id}:9`] }]);
+  });
+
+  it("leaves snooze notifications alone when the messages' new UIDs are unknown", async () => {
+    const { user, acc, push, clears, state } = setup();
+    await push.notifySnoozeEnded(user.id, acc.id, [{ uid: null, uidValidity: null, from: null, subject: 'Later' }]);
+    await push.clearRead(user.id, acc.id);
+    expect(clears()).toEqual([]);
+    expect(state.checks).toBe(0);
+  });
+});
+
 describe('presence messages from the browser', () => {
   it('reads presence updates and ignores anything else', () => {
     expect(parseClientEvent('{"type":"presence","active":true}')).toEqual({ type: 'presence', active: true });

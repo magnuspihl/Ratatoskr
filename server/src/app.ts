@@ -96,6 +96,11 @@ export async function buildApp(
       const folders = await Promise.all(store.listAccounts(userId).map((a) => mail.listFolders(userId, a.id)));
       return folders.some((f) => f.error) ? null : inboxUnread(folders);
     },
+    unreadInInbox: (userId, accountId, uidValidity, uids) =>
+      pool.withMailbox(userId, accountId, 'INBOX', async (client, mailbox) => {
+        if (mailbox.uidValidity.toString() !== uidValidity) return new Set<number>();
+        return new Set((await client.search({ uid: uids.join(','), seen: false }, { uid: true })) || []);
+      }),
     log: (msg, extra) => app.log.warn(extra ?? {}, msg),
   });
   const snooze = new SnoozeService({
@@ -111,6 +116,8 @@ export async function buildApp(
     const fresh = messages.filter((m) => !snooze.wasResurfaced(userId, accountId, m.messageId));
     if (fresh.length > 0) void push.notifyNewMail(userId, accountId, fresh);
   };
+  // Mail read (or moved away) elsewhere: close its notifications on the user's devices.
+  pool.onInboxChanged = (userId, accountId) => push.inboxChanged(userId, accountId);
   const compose = new ComposeService(store, mail, {
     maxMessageBytes: config.maxMessageBytes,
     blockPrivateHosts: config.blockPrivateMailHosts,
