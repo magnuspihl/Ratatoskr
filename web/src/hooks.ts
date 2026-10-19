@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ActionResult, ClientEvent, ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
 import { undoPlan, type UndoStep } from './swipe';
 import { api, type MailboxSel } from './api';
+import { applyThemeColor } from './themeColor';
 import { refKey } from './util';
 
 export const useMe = () => useQuery({ queryKey: ['me'], queryFn: api.me, retry: false, staleTime: Infinity });
@@ -173,6 +174,7 @@ export function useTheme(pref: Preferences['theme'] | undefined): ResolvedTheme 
   // Applied during render (idempotent) so children that read CSS variables, such as the message
   // iframe palette, already see the new theme in the same render.
   if (document.documentElement.dataset.theme !== theme) document.documentElement.dataset.theme = theme;
+  useEffect(() => applyThemeColor(document, theme), [theme]);
   return theme;
 }
 
