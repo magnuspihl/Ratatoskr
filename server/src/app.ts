@@ -8,6 +8,8 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { registerAuthRoutes } from './auth/routes.js';
 import { Sessions } from './auth/session.js';
 import type { Config } from './config.js';
+import { MailCache } from './cache/store.js';
+import { CacheSync } from './cache/sync.js';
 import { Keyring } from './crypto.js';
 import { Store } from './db.js';
 import { MailService } from './imap/mail.js';
@@ -53,6 +55,9 @@ export interface App {
   app: FastifyInstance;
   store: Store;
   pool: ImapPool;
+  mail: MailService;
+  cache: MailCache | null;
+  cacheSync: CacheSync | null;
   push: PushService;
   snooze: SnoozeService;
 }
@@ -69,6 +74,8 @@ export async function buildApp(
     pushTransport?: PushTransport;
     /** Replaces the DNS check of push service hosts (tests only). */
     pushHostCheck?: (host: string) => Promise<void>;
+    /** Where the mail cache lives, null for none. Defaults to cache.db in the data directory (memory with `store`). */
+    cacheFile?: string | null;
   } = {},
 ): Promise<App> {
   const app = Fastify({
@@ -84,7 +91,33 @@ export async function buildApp(
     blockPrivateHosts: config.blockPrivateMailHosts,
     log: (msg, extra) => app.log.info(extra ?? {}, msg),
   });
-  const mail = new MailService(pool);
+  // The mail cache: copies of INBOX and Sent, kept in step with the IMAP server. Disposable, so a
+  // separate file from the main database.
+  const cacheLog = (msg: string, extra?: Record<string, unknown>) => app.log.warn(extra ?? {}, msg);
+  // With an injected store (tests) the cache defaults to memory too.
+  const cacheFile = opts.cacheFile !== undefined ? opts.cacheFile : opts.store ? ':memory:' : path.join(config.dataDir, 'cache.db');
+  const cache = config.cache && cacheFile !== null ? new MailCache(cacheFile, { cacheKey: keyring.cacheKey, indexKey: keyring.cacheIndexKey }, cacheLog) : null;
+  const cacheSync =
+    cache && config.cache
+      ? new CacheSync({
+          cache,
+          pool,
+          config: config.cache,
+          // Called only once a sync runs, after `mail` exists.
+          sentFolder: (userId, accountId) => mail.specialFolder(userId, accountId, 'sent'),
+          isWatched: (userId, accountId) => pool.isWatching(userId, accountId),
+          onChanged: (userId, accountId, folder) => pool.onEvent(userId, { type: 'mailbox', accountId, folder }),
+          log: cacheLog,
+        })
+      : null;
+  const mail = new MailService(
+    pool,
+    cache && cacheSync && config.cache
+      ? { cache, sync: cacheSync, maxBodyBytes: config.cache.maxBodyBytes, bodyBytesPerAccount: config.cache.bodyBytesPerAccount }
+      : null,
+  );
+  pool.onWatching = (userId, accountId) => mail.syncAccount(userId, accountId);
+  pool.onInboxActivity = (userId, accountId) => mail.folderChanged(userId, accountId, 'INBOX');
   const vapid = vapidKeysFromSeed(keyring.vapidSeed);
   let live: LiveSessions = { isUserActive: () => false };
   const push = new PushService({
@@ -169,6 +202,7 @@ export async function buildApp(
 
   // Users with notifications on some device are watched even while no browser is open.
   app.addHook('onReady', async () => {
+    cache?.prune(store.allAccountKeys());
     for (const userId of store.pushUserIds()) pool.setBackground(userId, true);
     // Also wakes messages whose snooze ended while the server was down.
     snooze.start();
@@ -176,9 +210,11 @@ export async function buildApp(
 
   app.addHook('onClose', async () => {
     await snooze.stop();
+    await cacheSync?.stop();
     await pool.close();
+    cache?.close();
     if (!opts.store) store.close();
   });
 
-  return { app, store, pool, push, snooze };
+  return { app, store, pool, mail, cache, cacheSync, push, snooze };
 }

@@ -42,11 +42,22 @@ export interface Config {
   maxMessageBytes: number;
   /** Largest total upload size (bytes) for compose attachments. */
   maxUploadBytes: number;
+  /** Local copies of INBOX and Sent (see cache/store.ts); null = off, every request goes to IMAP. */
+  cache: CacheConfig | null;
   webDir: string;
   /** Contact for push services (VAPID `sub`): a mailto: or https: URL. */
   vapidSubject: string;
   /** What new mail accounts start with (templates with {username} etc.). */
   accountDefaults: AccountDefaultsConfig;
+}
+
+export interface CacheConfig {
+  /** Newest messages kept per cached folder. */
+  messagesPerFolder: number;
+  /** Largest message (bytes) whose content is kept. */
+  maxBodyBytes: number;
+  /** Total message content (bytes) kept per account; the least recently read goes first. */
+  bodyBytesPerAccount: number;
 }
 
 export type Registration = 'open' | 'first' | 'closed';
@@ -119,6 +130,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   const accountDefaults = loadAccountDefaults(env, errors);
 
+  // Server-wide limits, never per user: one user must not be able to fill the disk.
+  const cache: CacheConfig | null = bool(env.RATATOSKR_CACHE, true)
+    ? {
+        messagesPerFolder: int(env.RATATOSKR_CACHE_MESSAGES, 2000),
+        maxBodyBytes: Math.round(Number(env.RATATOSKR_CACHE_MAX_BODY_MB || 1) * 1024 * 1024),
+        bodyBytesPerAccount: int(env.RATATOSKR_CACHE_ACCOUNT_MB, 200) * 1024 * 1024,
+      }
+    : null;
+  if (cache && !(cache.messagesPerFolder >= 50 && cache.messagesPerFolder <= 100_000)) {
+    errors.push('RATATOSKR_CACHE_MESSAGES must be between 50 and 100000');
+  }
+  if (cache && !(cache.maxBodyBytes >= 0 && cache.bodyBytesPerAccount >= 0)) {
+    errors.push('RATATOSKR_CACHE_MAX_BODY_MB and RATATOSKR_CACHE_ACCOUNT_MB must not be negative');
+  }
+
   if (errors.length) throw new Error(`Invalid configuration:\n  - ${errors.join('\n  - ')}`);
 
   return {
@@ -139,6 +165,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     imapIdleTimeoutMs: int(env.RATATOSKR_IMAP_IDLE_TIMEOUT, 300) * 1000,
     maxMessageBytes: int(env.RATATOSKR_MAX_MESSAGE_MB, 50) * 1024 * 1024,
     maxUploadBytes: int(env.RATATOSKR_MAX_UPLOAD_MB, 25) * 1024 * 1024,
+    cache,
     webDir: path.resolve(env.RATATOSKR_WEB_DIR || './dist/web'),
     vapidSubject,
     accountDefaults,

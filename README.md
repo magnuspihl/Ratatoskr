@@ -2,12 +2,12 @@
 
 A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**.
 
-- **Thin client.** Your IMAP/SMTP servers stay the source of truth. Ratatoskr has no local mail
-  store, no message cache and no sync engine. The only state it keeps is users, their encrypted
-  account settings and preferences (plus, for notifications, push subscriptions and the newest
-  INBOX UID already notified about, and for snoozed mail, folder, UID and wake-up time), in one
-  SQLite file.
-- **One container.** Configured by environment variables, with a volume for the SQLite file. No
+- **Your mail server stays the source of truth.** Ratatoskr keeps users, their encrypted account
+  settings and preferences (plus, for notifications, push subscriptions and the newest INBOX UID
+  already notified about, and for snoozed mail, folder, UID and wake-up time) in one SQLite file.
+  To be quick, it also keeps an encrypted, disposable copy of each account's newest INBOX and Sent
+  mail in a second one; see [Mail cache](#mail-cache).
+- **One container.** Configured by environment variables, with a volume for the SQLite files. No
   Redis, no Postgres, no sidecars.
 - **Modern UI.** Clean three-pane layout, first-class dark mode, usable on a phone.
 - **Every email is treated as hostile.** See [Security model](#security-model).
@@ -98,12 +98,16 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | `OIDC_SCOPES` | no | `openid email profile` | Requested scopes. |
 | `OIDC_LABEL` | no | `Single sign-on` | Provider name on the login button ("Sign in with …"), e.g. `Authentik`. |
 | `RATATOSKR_TRUST_PROXY` | no | `false` | Trust `X-Forwarded-*` headers. Set to `true` behind a reverse proxy. |
-| `RATATOSKR_DATA_DIR` | no | `./data` (`/data` in the image) | Where `ratatoskr.db` (SQLite) lives. |
+| `RATATOSKR_DATA_DIR` | no | `./data` (`/data` in the image) | Where `ratatoskr.db` and the mail cache `cache.db` (SQLite) live. |
 | `PORT` / `HOST` | no | `8080` / `0.0.0.0` | Listen address. |
 | `RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS` | no | `false` | Refuse IMAP/SMTP hosts that resolve to private/internal addresses. Turn on if untrusted users can log in. Leave off if your mail server is on your LAN. |
 | `RATATOSKR_IMAP_IDLE_TIMEOUT` | no | `300` | Seconds before an unused pooled IMAP connection is closed. |
 | `RATATOSKR_MAX_MESSAGE_MB` | no | `50` | Largest message the server downloads for display. |
 | `RATATOSKR_MAX_UPLOAD_MB` | no | `25` | Largest total attachment upload when composing. |
+| `RATATOSKR_CACHE` | no | `true` | Keep a local copy of each account's newest INBOX and Sent mail, see [Mail cache](#mail-cache). `false` asks the mail server every time. |
+| `RATATOSKR_CACHE_MESSAGES` | no | `2000` | Newest messages kept per cached folder (50–100000). Older mail is fetched from the mail server as you scroll. |
+| `RATATOSKR_CACHE_MAX_BODY_MB` | no | `1` | Largest message whose content is kept (`0`: keep no message content). |
+| `RATATOSKR_CACHE_ACCOUNT_MB` | no | `200` | Message content kept per account; the least recently read goes first. |
 | `RATATOSKR_VAPID_SUBJECT` | no | `RATATOSKR_BASE_URL` if it is `https://`, else `mailto:postmaster@<host>` | Contact sent to push services (Apple, Google, Mozilla) with every notification: a `mailto:` or `https:` URL. |
 | `RATATOSKR_DEFAULT_*` | no | – | Starting values for new mail accounts, see [Default account settings](#default-account-settings). |
 | `LOG_LEVEL` | no | `info` | `fatal`, `error`, `warn`, `info`, `debug`, `trace`. |
@@ -276,6 +280,43 @@ claim, and each user sees only the mail accounts they added themselves. Ratatosk
 - Allow request bodies at least as large as `RATATOSKR_MAX_UPLOAD_MB` (plus a little overhead).
 - Serve Ratatoskr on its own (sub)domain, not under a path prefix.
 
+### Mail cache
+
+Asking the mail server for everything on every click is slow: one page of a folder takes several
+IMAP round trips, and finding the rest of each conversation in the Sent folder means header
+searches that some servers are slow at. So Ratatoskr keeps a copy of the newest messages
+(`RATATOSKR_CACHE_MESSAGES`, 2000 by default) of each account's **INBOX** and **Sent** folder:
+sender, subject, snippet, flags and the headers that tie conversations together. It also keeps the
+content of messages you have opened, and loads the newest unread ones ahead, up to
+`RATATOSKR_CACHE_MAX_BODY_MB` per message and `RATATOSKR_CACHE_ACCOUNT_MB` per account. The limits
+are server settings; users can't change them.
+
+The mail server stays the source of truth:
+
+- Every action (read, flag, move, delete, send) goes to the mail server first; the copy is updated
+  once the server has done it.
+- The copy follows the server. While INBOX is watched (a browser is open, or notifications are on),
+  every change reported by IDLE is fetched right away, so the inbox shows without asking the server.
+  Otherwise, and for Sent, a listing first gives the server a moment (1.5 s) to report changes, and
+  shows the copy if it is slower; the list updates by itself when the changes arrive. **Refresh**
+  always checks with the server first. Changes are fetched incrementally: new messages, changed
+  flags (only those since the last check where the server supports CONDSTORE) and messages that are
+  gone. A new UIDVALIDITY starts the folder over.
+- Other folders, searches, scrolling past the copy, attachments and folder counts always go to the
+  mail server.
+- The copy is disposable. It is a separate file (`cache.db`), and anything wrong with it (a damaged
+  file, an entry that doesn't decrypt, another secret key, a new format) just empties it, or the
+  folder concerned, and it is filled again from the server. Deleting the file while Ratatoskr is
+  stopped is always safe.
+
+What is stored and how: subjects, addresses, snippets, Message-IDs, References and message content
+are encrypted with AES-256-GCM (a key derived from `RATATOSKR_SECRET_KEY`), each entry bound to its
+user, account, folder and message, so a copied row doesn't decrypt elsewhere. Conversations are
+matched through keyed hashes (HMAC) of the Message-IDs, not the IDs themselves. Readable in the file
+are only what queries need: folder names, UIDs, arrival times, sizes and the read/flagged/answered/
+draft flags. An account's copy is deleted with the account, or when it is pointed at another server
+or login.
+
 ## Security model
 
 Every message is assumed to be hostile.
@@ -314,6 +355,7 @@ Every message is assumed to be hostile.
 - **Credentials:** AES-256-GCM with a random IV, and the ciphertext bound to its user and account
   (AAD), so a copied database row doesn't decrypt elsewhere. Passwords are never returned by the
   API.
+- **Cached mail** is encrypted the same way; see [Mail cache](#mail-cache) for what is readable.
 - **Notifications:** push subscription endpoints come from the browser, so the server treats
   them like remote image URLs. It accepts any HTTPS push service (so every browser's push service
   works), but only on the standard port, without credentials, IP literals or reserved names. It
@@ -368,6 +410,8 @@ server/src
   app.ts            Fastify setup, security headers, static files
   auth/             OIDC login (openid-client), password login (scrypt) and encrypted session cookies
   db.ts             SQLite store: users, encrypted accounts, preferences, recent recipients
+  cache/store.ts    Mail cache: encrypted copies of INBOX and Sent (a separate, disposable SQLite file)
+  cache/sync.ts     Keeps the mail cache in step with the IMAP server
   imap/pool.ts      Lazy per-account IMAP connections with idle timeout; IDLE watchers
   imap/mail.ts      Folders, unified listing (k-way merge with per-account UID cursors), actions
   mail/sanitize.ts  HTML sanitizer; mail/css.ts CSS sanitizer
@@ -381,7 +425,8 @@ web/src             React + TanStack Query client
 Paging the unified inbox: each source (account + folder) is consumed newest-UID-first. Pages are
 merged by date, and the cursor stores, per source, the UIDVALIDITY and the lowest UID returned so
 far. If a folder's UIDVALIDITY changes, the server tells the client to reload the list. Message
-actions carry the UIDVALIDITY too and are refused (HTTP 409) if it no longer matches.
+actions carry the UIDVALIDITY too and are refused (HTTP 409) if it no longer matches. Cached
+folders use the same cursors, so a page can come from the cache and the next from the IMAP server.
 
 ## Limitations
 

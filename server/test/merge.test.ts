@@ -1,4 +1,3 @@
-import type { FetchMessageObject } from 'imapflow';
 import { describe, expect, it } from 'vitest';
 import { decodeCursor, encodeCursor, mergePages } from '../src/imap/mail.js';
 
@@ -9,7 +8,7 @@ function page(accountId: string, entries: [uid: number, time: number][], exhaust
     uidValidity: '1',
     exhausted,
     reset: false,
-    items: entries.map(([uid, sortTime]) => ({ source, uidValidity: '1', sortTime, msg: { uid, seq: uid } as FetchMessageObject })),
+    items: entries.map(([uid, sortTime]) => ({ source, uidValidity: '1', uid, sortTime, headers: { messageId: null, inReplyTo: null, references: [] } })),
   };
 }
 
@@ -18,7 +17,7 @@ describe('unified inbox merge', () => {
     const a = page('a', [[10, 100], [9, 80], [8, 60]], true);
     const b = page('b', [[50, 90], [49, 70], [48, 10]], false);
     const { picked, cursor, more } = mergePages([a, b], 4, {});
-    expect(picked.map((p) => `${p.source.accountId}${p.msg.uid}`)).toEqual(['a10', 'b50', 'a9', 'b49']);
+    expect(picked.map((p) => `${p.source.accountId}${p.uid}`)).toEqual(['a10', 'b50', 'a9', 'b49']);
     expect(cursor['a\u0000INBOX']).toEqual({ uidValidity: '1', beforeUid: 9, done: false });
     expect(cursor['b\u0000INBOX']).toEqual({ uidValidity: '1', beforeUid: 49, done: false });
     expect(more).toBe(true);
@@ -29,7 +28,7 @@ describe('unified inbox merge', () => {
     const a = page('a', [[10, 50], [9, 100]], true);
     const b = page('b', [[5, 60]], true);
     const { picked, cursor } = mergePages([a, b], 2, {});
-    expect(picked.map((p) => `${p.source.accountId}${p.msg.uid}`)).toEqual(['b5', 'a10']);
+    expect(picked.map((p) => `${p.source.accountId}${p.uid}`)).toEqual(['b5', 'a10']);
     expect(cursor['a\u0000INBOX']!.beforeUid).toBe(10);
   });
 

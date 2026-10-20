@@ -10,6 +10,10 @@ export class Keyring {
   readonly sessionKey: Buffer;
   /** P-256 private scalar for Web Push (VAPID). Derived, so no extra key needs configuring. */
   readonly vapidSeed: Buffer;
+  /** Encrypts the mail cache (message summaries and bodies). */
+  readonly cacheKey: Buffer;
+  /** Keyed hashes of Message-IDs in the mail cache, so conversations can be matched without storing the IDs. */
+  readonly cacheIndexKey: Buffer;
 
   constructor(masterSecret: string) {
     if (masterSecret.length < 32) throw new Error('Master secret must be at least 32 characters');
@@ -19,6 +23,8 @@ export class Keyring {
     this.credentialKey = derive('account-credentials-v1');
     this.sessionKey = derive('session-cookie-v1');
     this.vapidSeed = derive('web-push-vapid-v1');
+    this.cacheKey = derive('mail-cache-v1');
+    this.cacheIndexKey = derive('mail-cache-index-v1');
   }
 }
 
@@ -49,6 +55,24 @@ export function decrypt(key: Buffer, sealed: string, aad: string): string {
   decipher.setAAD(Buffer.from(aad, 'utf8'));
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(Buffer.from(ctB64, 'base64url')), decipher.final()]).toString('utf8');
+}
+
+/** Like `encrypt`, for binary data: IV (12 bytes), tag (16 bytes) and ciphertext in one buffer. */
+export function encryptBytes(key: Buffer, plaintext: Buffer, aad: string): Buffer {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(aad, 'utf8'));
+  const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), ct]);
+}
+
+export function decryptBytes(key: Buffer, sealed: Uint8Array, aad: string): Buffer {
+  const buf = Buffer.from(sealed.buffer, sealed.byteOffset, sealed.byteLength);
+  if (buf.length < 28) throw new Error('Malformed ciphertext');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, buf.subarray(0, 12), { authTagLength: 16 });
+  decipher.setAAD(Buffer.from(aad, 'utf8'));
+  decipher.setAuthTag(buf.subarray(12, 28));
+  return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]);
 }
 
 /** Encrypt-and-authenticate a JSON value with an expiry (used for cookies). */

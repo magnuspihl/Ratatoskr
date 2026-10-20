@@ -26,6 +26,8 @@ interface Watcher {
   backoffMs: number;
   /** Serialises new-mail checks so one arrival is never reported twice. */
   checking: Promise<void>;
+  /** The client listening for changes right now (set once its listeners are in place). */
+  listening: ImapFlow | null;
 }
 
 export class NotFoundError extends Error {}
@@ -39,7 +41,7 @@ const FOLDER_CACHE_MS = 60_000;
  * changes. For background users it also reports newly arrived unread messages (onNewMail),
  * remembering the highest UID seen per account so nothing is reported twice, even across restarts.
  *
- * There is no message cache: every request goes to the IMAP server.
+ * Message data is not kept here; the mail cache (cache/) follows the watchers' activity.
  */
 export class ImapPool {
   private readonly conns = new Map<string, CommandConnection>();
@@ -51,6 +53,10 @@ export class ImapPool {
   onNewMail: (userId: string, accountId: string, messages: NewMail[]) => void = () => {};
   /** Flags changed or messages left INBOX (also called after reconnecting, since changes may have been missed). */
   onInboxChanged: (userId: string, accountId: string) => void = () => {};
+  /** A watcher (re)connected to an account's INBOX: anything may have changed while it wasn't. */
+  onWatching: (userId: string, accountId: string) => void = () => {};
+  /** Anything happened in a watched INBOX: new mail, flags changed or messages left. */
+  onInboxActivity: (userId: string, accountId: string) => void = () => {};
 
   constructor(
     private readonly store: Store,
@@ -216,6 +222,12 @@ export class ImapPool {
     }
   }
 
+  /** True while the account's INBOX watcher is connected (so every change there is reported). */
+  isWatching(userId: string, accountId: string): boolean {
+    const w = this.watchers.get(userId)?.get(accountId);
+    return !!w && !!w.client?.usable && w.listening === w.client;
+  }
+
   isBackground(userId: string): boolean {
     return this.background.has(userId);
   }
@@ -253,6 +265,7 @@ export class ImapPool {
       retry: null,
       backoffMs: 5_000,
       checking: Promise.resolve(),
+      listening: null,
     };
     byAccount.set(accountId, w);
     void this.runWatcher(userId, accountId, w);
@@ -279,7 +292,11 @@ export class ImapPool {
       w.backoffMs = 5_000;
       // Also reports mail that arrived while disconnected (or while the server was down).
       if (this.background.has(userId)) this.checkNewMail(userId, accountId, w, client);
-      const changed = () => emit({ type: 'mailbox', accountId, folder });
+      this.onWatching(userId, accountId);
+      const changed = () => {
+        emit({ type: 'mailbox', accountId, folder });
+        this.onInboxActivity(userId, accountId);
+      };
       client.on('exists', () => {
         changed();
         if (this.background.has(userId)) this.checkNewMail(userId, accountId, w, client);
@@ -292,8 +309,10 @@ export class ImapPool {
       client.on('flags', inboxChanged);
       client.on('close', () => {
         if (w.client === client) w.client = null;
+        if (w.listening === client) w.listening = null;
         this.scheduleWatcher(userId, accountId, w);
       });
+      w.listening = client;
     } catch (err) {
       if (err instanceof NotFoundError) return;
       this.opts.log?.('IMAP watcher failed', { accountId, error: (err as Error).message });

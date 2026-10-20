@@ -498,6 +498,7 @@ export function App() {
         onRefresh={() => {
           // An explicit refresh also lets read messages leave the unread-only list.
           setSticky({ view: '', keys: new Set() });
+          api.requestFresh();
           void qc.invalidateQueries({ queryKey: ['messages'] });
           void qc.invalidateQueries({ queryKey: ['folders'] });
         }}

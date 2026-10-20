@@ -177,7 +177,8 @@ function toView(r: AccountRow): AccountView {
  * Persistence for the only state Ratatoskr keeps: users, their (encrypted) account settings,
  * preferences, recently used recipients, sender domains allowed to show images, Web Push
  * subscriptions, the highest INBOX UID already notified about and when snoozed messages (by folder
- * and UID) return. No mail content is ever stored.
+ * and UID) return. No mail content is stored here; the disposable mail cache (cache/store.ts) is a
+ * separate file.
  *
  * Every account query is scoped by user id; there is deliberately no "get account by id" without
  * an owner, which keeps per-user isolation enforced at the data layer.
@@ -301,6 +302,12 @@ export class Store {
       .prepare('SELECT * FROM accounts WHERE user_id = ? ORDER BY position, created_at')
       .all(userId) as unknown as AccountRow[];
     return rows.map(toView);
+  }
+
+  /** Every account as `${userId}\0${accountId}` (to forget cached mail of deleted accounts). */
+  allAccountKeys(): Set<string> {
+    const rows = this.db.prepare('SELECT user_id, id FROM accounts').all() as { user_id: string; id: string }[];
+    return new Set(rows.map((r) => `${r.user_id}\u0000${r.id}`));
   }
 
   getAccountSecret(userId: string, accountId: string): AccountSecret | null {
