@@ -16,6 +16,9 @@ services:
       # Also allow username/password login next to OIDC (it's the default without OIDC_*):
       # RATATOSKR_PASSWORD_LOGIN: "true"
       # RATATOSKR_REGISTRATION: first   # open | first | closed
+      # User and group that run the server and own /data (default 1000:1000):
+      # PUID: "1000"
+      # PGID: "1000"
     volumes:
       - ratatoskr-data:/data
 

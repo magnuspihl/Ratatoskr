@@ -40,6 +40,10 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
   their website. Like remote images, the server fetches them, so these services never see your
   IP address or when you read a message. Turn them off in Settings.
 - Mark read/unread, flag, move, archive, delete (to Trash, expunge only from Trash), multi-select.
+  On touch screens, swipe a message left or right to delete, archive, mark read/unread or flag it
+  (which action each direction does is set in Settings).
+- "Unread only" filter for the current view. Messages you read there stay on screen until you
+  change the view or refresh, so the list doesn't jump under your finger.
 - Snooze: hide a message until a date and time you pick (or Later today / Tomorrow / This weekend /
   Next week). See [Snooze](#snooze).
 - Compose, reply, reply-all, and forward (with the original attachments). Includes a light
@@ -81,8 +85,15 @@ A simple, good-looking, self-hosted webmail client for **any IMAP/SMTP account**
 4. Put a TLS-terminating reverse proxy in front (see below), open `https://mail.example.com`,
    sign in, and add your first mail account.
 
-The image is published to `ghcr.io/<owner>/ratatoskr` by the GitHub Actions workflow on every
-push to `main`. You can also build it yourself with `docker build -t ratatoskr .`.
+Images are published to `ghcr.io/<owner>/ratatoskr` when a release is made (see
+[Releasing](#releasing)), tagged with the version (`1.2.3`, `1.2`, `1` from 1.0.0 on) and
+`latest`. You can also build it yourself with `docker build -t ratatoskr .`.
+
+The server runs as user and group `1000:1000` and takes over the data directory on start (it
+`chown`s it when anything in it belongs to someone else). To run as someone else, set `PUID` and
+`PGID`, e.g. `99` and `100` (`nobody:users`) for an unRAID appdata folder. `UMASK` (e.g. `002`)
+sets the permissions of the files it creates. Starting the container with `--user` (`user:` in
+Compose) also works; then it runs as that user, ignores `PUID`/`PGID` and changes no ownership.
 
 ## Configuration
 
@@ -99,6 +110,8 @@ push to `main`. You can also build it yourself with `docker build -t ratatoskr .
 | `OIDC_LABEL` | no | `Single sign-on` | Provider name on the login button ("Sign in with …"), e.g. `Authentik`. |
 | `RATATOSKR_TRUST_PROXY` | no | `false` | Trust `X-Forwarded-*` headers. Set to `true` behind a reverse proxy. |
 | `RATATOSKR_DATA_DIR` | no | `./data` (`/data` in the image) | Where `ratatoskr.db` and the mail cache `cache.db` (SQLite) live. |
+| `PUID` / `PGID` | no | `1000` / `1000` | Docker image only: user and group the server runs as and that owns the data directory. |
+| `UMASK` | no | – | Docker image only: umask for files the server creates, e.g. `022` or `002`. |
 | `PORT` / `HOST` | no | `8080` / `0.0.0.0` | Listen address. |
 | `RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS` | no | `false` | Refuse IMAP/SMTP hosts that resolve to private/internal addresses. Turn on if untrusted users can log in. Leave off if your mail server is on your LAN. |
 | `RATATOSKR_IMAP_IDLE_TIMEOUT` | no | `300` | Seconds before an unused pooled IMAP connection is closed. |
@@ -226,8 +239,8 @@ Two login methods are available, alone or together:
   the first person to open a fresh instance can create an account (`RATATOSKR_REGISTRATION=first`).
   To let others sign up, set `RATATOSKR_REGISTRATION=open` (for a while, or permanently on a
   private network), then back to `closed`. With open registration on a public instance, also set
-  `RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS=true` so strangers can't point IMAP/SMTP at your LAN. After 10 wrong passwords for one username, or 30 from
-  one IP address, logins are refused for 15 minutes. Users change their password in **Settings**.
+  `RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS=true` so strangers can't point IMAP/SMTP at your LAN. After
+  10 wrong passwords for one username, or 30 from one IP address, logins are refused for 15 minutes. Users change their password in **Settings**.
 - **OpenID Connect** (Authentik, Keycloak, …): see below.
 
 Password users and OIDC users are separate accounts, even if they share an email address.
@@ -398,10 +411,18 @@ logins always return to that one host.
 | Command | What it does |
 | --- | --- |
 | `npm run typecheck` | Type-check server and web client. |
-| `npm test` | Unit tests: sanitizer (hostile fixtures), MIME parsing, credential encryption, SSRF guards, unified-inbox merging, Web Push encryption (RFC 8291 test vector), notifications and snooze scheduling. |
-| `npm run test:integration` | Starts a throwaway [GreenMail](https://greenmail-mail-test.github.io/greenmail/) container (Docker), runs the full HTTP API against real IMAP/SMTP, and removes the container. |
+| `npm test` | Unit tests: sanitizer (hostile fixtures), MIME parsing, credential encryption, SSRF guards, unified-inbox merging, conversations, the mail cache, Web Push encryption (RFC 8291 test vector), notifications, snooze scheduling, the web client's pure logic and the release version script. |
+| `npm run test:integration` | Starts a throwaway [GreenMail](https://greenmail-mail-test.github.io/greenmail/) container (Docker), runs the full HTTP API against real IMAP/SMTP, and removes the container. Also builds the image's base stage and checks the container entrypoint (`PUID`/`PGID`, data directory ownership). |
 | `npm run build` | Compiles the server to `dist/server` and the web client to `dist/web`. |
 | `npm start` | Runs the production build. |
+
+### Releasing
+
+Pushes to `main` only run CI. To publish, open **Actions → Release → Run workflow** and pick a
+bump: `patch`, `minor` or `major` off the newest `v*` tag (the first release starts from 0.0.0).
+The workflow runs all tests, pushes the image tagged with the version and `latest`, and creates
+the `vX.Y.Z` tag and a GitHub Release with generated notes. For a specific version, push the tag
+yourself instead: `git tag v1.2.3 && git push origin v1.2.3`.
 
 ### Architecture
 
@@ -409,17 +430,22 @@ logins always return to that one host.
 server/src
   app.ts            Fastify setup, security headers, static files
   auth/             OIDC login (openid-client), password login (scrypt) and encrypted session cookies
-  db.ts             SQLite store: users, encrypted accounts, preferences, recent recipients
+  db.ts             SQLite store: users, encrypted accounts, preferences, recent recipients, image
+                    allowlist, push subscriptions, snoozes
   cache/store.ts    Mail cache: encrypted copies of INBOX and Sent (a separate, disposable SQLite file)
   cache/sync.ts     Keeps the mail cache in step with the IMAP server
   imap/pool.ts      Lazy per-account IMAP connections with idle timeout; IDLE watchers
   imap/mail.ts      Folders, unified listing (k-way merge with per-account UID cursors), actions
+  imap/related.ts   Finding the rest of a conversation (replies in Sent, older messages)
   mail/sanitize.ts  HTML sanitizer; mail/css.ts CSS sanitizer
   mail/compose.ts   MIME building (Nodemailer MailComposer); mail/send.ts SMTP + Sent/Drafts
   mail/snooze.ts    Snoozed folder, wake-up timer, putting mail back into INBOX
-  net/              SSRF guards and the server-side remote image fetcher
-shared/             Types and the sandboxed iframe document builder (used by both sides)
+  net/              SSRF guards, the server-side remote image fetcher and contact pictures
+  push/             Web Push (VAPID, RFC 8291 encryption) and new-mail notifications
+shared/             Types, conversation grouping and the sandboxed iframe document builder
 web/src             React + TanStack Query client
+docker/             Container entrypoint (drops to PUID:PGID)
+scripts/            Dev server launcher, icon generator, release version script
 ```
 
 Paging the unified inbox: each source (account + folder) is consumed newest-UID-first. Pages are
@@ -430,7 +456,8 @@ folders use the same cursors, so a page can come from the cache and the next fro
 
 ## Limitations
 
-- No conversation threading yet. Messages are listed individually.
+- Conversations bring together the listed folder and Sent. A message of the conversation in
+  another folder (moved there by a filter, say) isn't shown with it.
 - Live updates (IDLE) cover each account's INBOX. Other folders refresh when you open them, when
   the window regains focus, and every couple of minutes.
 - Sent copies are appended without the Bcc header.
@@ -440,3 +467,8 @@ folders use the same cursors, so a page can come from the cache and the next fro
 - No OAuth2 IMAP (XOAUTH2 for Gmail/Microsoft 365). Use app passwords where the provider
   supports them.
 - Out of scope: server-side filters, calendar/contacts, JMAP, PGP, local full-text search.
+
+## License
+
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only). If you run a modified
+version as a service for others, you must offer them its source code.

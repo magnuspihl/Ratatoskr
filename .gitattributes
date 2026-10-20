@@ -1,1 +1,2 @@
 *.eml -text
+*.sh text eol=lf
