@@ -333,6 +333,10 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       if (!existing) throw new NotFoundError('Account not found');
       await verify(input, { imap: existing.imap.password, smtp: existing.smtp.password });
       const account = store.updateAccount(uid(req), req.params.id, input);
+      // Another server or login can mean another mailbox: cached mail no longer applies.
+      if (existing.imap.host !== input.imap.host || existing.imap.port !== input.imap.port || existing.imap.user !== input.imap.user) {
+        mail.forgetAccount(uid(req), req.params.id);
+      }
       pool.invalidate(uid(req), req.params.id);
       return account;
     } catch (err) {
@@ -342,6 +346,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
 
   app.delete<{ Params: { id: string } }>('/api/accounts/:id', async (req, reply) => {
     if (!store.deleteAccount(uid(req), req.params.id)) return reply.code(404).send({ error: 'Account not found' });
+    mail.forgetAccount(uid(req), req.params.id);
     pool.invalidate(uid(req), req.params.id);
     return { ok: true };
   });
@@ -364,6 +369,8 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
           cursor: z.string().max(10_000).optional(),
           q: z.string().trim().max(500).optional(),
           unread: z.enum(['0', '1']).optional(),
+          // 1: the user asked to refresh, so the cache must check with the IMAP server first.
+          fresh: z.enum(['0', '1']).optional(),
           limit: z.coerce.number().int().min(1).max(200).optional(),
         })
         .parse(req.query);
@@ -377,7 +384,7 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
         sources = store.listAccounts(userId).map((a) => ({ accountId: a.id, folder: 'INBOX' }));
       }
       const limit = q.limit ?? req.user!.preferences.pageSize;
-      const list = await mail.listMessages(userId, sources, q.cursor ?? null, limit, { text: q.q ?? '', unread: q.unread === '1' });
+      const list = await mail.listMessages(userId, sources, q.cursor ?? null, limit, { text: q.q ?? '', unread: q.unread === '1' }, { fresh: q.fresh === '1' });
       const until = snoozedUntil(userId);
       for (const m of [...list.messages, ...list.related]) {
         const t = until(m);

@@ -62,6 +62,9 @@ export interface MailboxSel {
 
 export type RemoteMode = 'auto' | 'load' | 'block';
 
+/** Until when first pages of message lists ask the server to check with the mail server first (after Refresh). */
+let freshUntil = 0;
+
 export const api = {
   me: () => request<Me>('GET', '/api/me'),
   savePreferences: (p: Preferences) => request<Preferences>('PUT', '/api/preferences', p),
@@ -79,6 +82,11 @@ export const api = {
 
   folders: () => request<AccountFolders[]>('GET', '/api/folders'),
 
+  /** The user asked to refresh: the next message lists must not come from a cache that may be behind. */
+  requestFresh: () => {
+    freshUntil = Date.now() + 5000;
+  },
+
   messages: (sel: MailboxSel, cursor: string | null, q: string, unread: boolean) => {
     const p = new URLSearchParams();
     if (sel.accountId) {
@@ -88,6 +96,7 @@ export const api = {
     if (cursor) p.set('cursor', cursor);
     if (q) p.set('q', q);
     if (unread) p.set('unread', '1');
+    if (!cursor && Date.now() < freshUntil) p.set('fresh', '1');
     return request<ListResponse>('GET', `/api/messages?${p.toString()}`);
   },
   /** auto: the server applies the sender-domain allowlist; load / block: override it. */

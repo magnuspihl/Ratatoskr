@@ -1,4 +1,4 @@
-import type { FetchMessageObject, FetchQueryObject, ImapFlow, ListResponse, MessageAddressObject, SearchObject } from 'imapflow';
+import type { FetchMessageObject, ImapFlow, ListResponse, SearchObject } from 'imapflow';
 import type {
   AccountCursor,
   AccountFolders,
@@ -12,15 +12,19 @@ import type {
   SpecialUse,
   UndoInfo,
 } from '../../../shared/types.js';
-import { firstMessageId, type ThreadHeaders } from '../../../shared/threads.js';
+import type { ThreadHeaders } from '../../../shared/threads.js';
+import { CacheCorruptError, imapFlags, type CachedFolder, type MailCache } from '../cache/store.js';
+import type { CacheSync } from '../cache/sync.js';
 import { decideRemoteImages, displayDomain } from '../mail/imageAllowlist.js';
-import { attachmentBytes, buildMessageDetail, parseRaw, parseReferences, type ParsedEmail } from '../mail/parse.js';
+import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
 import { collectRemoteImageUrls } from '../mail/sanitize.js';
 import { inlineRemoteImages, type InlineOptions, type RemoteImageCache } from '../net/remoteImages.js';
 import { MailServerError, describeError } from './connect.js';
 import type { ImapPool } from './pool.js';
 import { lookupTerms, matchesTerm, RelatedIndex, searchFor, termKey, type LookupTerm } from './related.js';
-import { findTextPart, hasAttachments, SNIPPET_FETCH_BYTES, snippetFromPart, type TextPart } from './snippet.js';
+import { addresses, fetchSnippets, LIST_FETCH, sortTime, summaryOf, threadHeaders, toDate } from './summary.js';
+
+export { threadHeaders };
 
 const SPECIAL_USE: Record<string, SpecialUse> = {
   '\\Inbox': 'inbox',
@@ -63,11 +67,15 @@ export interface ListFilter {
 export const NO_FILTER: ListFilter = { text: '', unread: false };
 export const isFiltered = (f: ListFilter) => f.text !== '' || f.unread;
 
+/** A message of a listing, fetched from the IMAP server (`msg`, no snippet yet) or from the cache (`summary`). */
 interface FetchedItem {
   source: ListSource;
   uidValidity: string;
-  msg: FetchMessageObject;
+  uid: number;
   sortTime: number;
+  headers: ThreadHeaders;
+  msg?: FetchMessageObject;
+  summary?: MessageSummary;
 }
 
 interface SourcePage {
@@ -84,7 +92,11 @@ type CursorMap = Record<string, AccountCursor>;
 const sourceKey = (s: ListSource) => `${s.accountId}\u0000${s.folder}`;
 
 function fetchedItem(source: ListSource, uidValidity: string, msg: FetchMessageObject): FetchedItem {
-  return { source, uidValidity, msg, sortTime: (toDate(msg.internalDate) ?? toDate(msg.envelope?.date) ?? new Date(0)).getTime() };
+  return { source, uidValidity, uid: msg.uid, sortTime: sortTime(msg), headers: threadHeaders(msg), msg };
+}
+
+function cachedItem(source: ListSource, uidValidity: string, m: { summary: MessageSummary; sortTime: number }): FetchedItem {
+  return { source, uidValidity, uid: m.summary.uid, sortTime: m.sortTime, headers: m.summary, summary: m.summary };
 }
 
 export function encodeCursor(c: CursorMap): string {
@@ -109,35 +121,10 @@ export function decodeCursor(raw: string | undefined | null): CursorMap {
   }
 }
 
-function addresses(list: MessageAddressObject[] | undefined): Address[] {
-  return (list ?? []).filter((a) => a.address).map((a) => ({ name: a.name ?? '', address: a.address! }));
-}
-
-/** References kept per message: the root and the most recent ancestors are what threading needs. */
-const MAX_REFERENCES = 30;
 /** Related messages fetched per folder and page. */
 const MAX_RELATED = 200;
-
-const LIST_FETCH: FetchQueryObject = { uid: true, flags: true, envelope: true, bodyStructure: true, internalDate: true, size: true, headers: ['references', 'in-reply-to'] };
-
-/** Message-ID, In-Reply-To and References of a message fetched with LIST_FETCH. */
-export function threadHeaders(msg: Pick<FetchMessageObject, 'envelope' | 'headers'>): ThreadHeaders {
-  // Read from the headers: not every server puts In-Reply-To in the ENVELOPE.
-  const raw = msg.headers?.toString('latin1').replace(/\r?\n[ \t]+/g, ' ') ?? '';
-  let references = parseReferences(raw.match(/^references:(.*)$/im)?.[1]);
-  if (references.length > MAX_REFERENCES) references = [references[0]!, ...references.slice(-(MAX_REFERENCES - 1))];
-  return {
-    messageId: firstMessageId(msg.envelope?.messageId) ?? msg.envelope?.messageId ?? null,
-    inReplyTo: firstMessageId(raw.match(/^in-reply-to:(.*)$/im)?.[1]) ?? firstMessageId(msg.envelope?.inReplyTo),
-    references,
-  };
-}
-
-function toDate(d: Date | string | undefined): Date | null {
-  if (!d) return null;
-  const date = d instanceof Date ? d : new Date(d);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
+/** A listing of a current cached INBOX checks the cached Sent folder in the background when it is older than this. */
+const SENT_REFRESH_MS = 5000;
 
 /**
  * K-way merge of per-source pages. Each source's items are a queue ordered newest-UID-first; at
@@ -166,8 +153,8 @@ export function mergePages(pages: SourcePage[], limit: number, previous: CursorM
     const key = sourceKey(q.page.source);
     const prev = q.page.reset ? undefined : previous[key];
     const consumedAll = q.idx >= q.page.items.length;
-    const lastConsumed = q.idx > 0 ? q.page.items[q.idx - 1]!.msg.uid : null;
-    const firstUid = q.page.items[0]?.msg.uid;
+    const lastConsumed = q.idx > 0 ? q.page.items[q.idx - 1]!.uid : null;
+    const firstUid = q.page.items[0]?.uid;
     const beforeUid = lastConsumed ?? prev?.beforeUid ?? (firstUid !== undefined ? firstUid + 1 : Number.MAX_SAFE_INTEGER);
     const done = consumedAll && q.page.exhausted;
     cursor[key] = { uidValidity: q.page.uidValidity, beforeUid, done };
@@ -205,10 +192,68 @@ export async function searchWithFallback(client: ImapFlow, attempts: SearchObjec
   return [];
 }
 
+/** The mail cache (see cache/store.ts), when it is switched on. */
+export interface MailCacheDeps {
+  cache: MailCache;
+  sync: CacheSync;
+  /** Largest message whose content is kept, and how much content one account may keep. */
+  maxBodyBytes: number;
+  bodyBytesPerAccount: number;
+}
+
 export class MailService {
   private readonly relatedIndex = new RelatedIndex();
 
-  constructor(private readonly pool: ImapPool) {}
+  constructor(
+    private readonly pool: ImapPool,
+    private readonly cached: MailCacheDeps | null = null,
+  ) {}
+
+  // ---- cache -----------------------------------------------------------------
+
+  /**
+   * Run `fn` against the cache. Any problem with it is handled (see CacheSync.handleError) and
+   * `fallback` returned instead, so a broken cache only ever means going to the IMAP server.
+   */
+  private fromCache<T>(userId: string, accountId: string, folder: string, fallback: T, fn: (c: MailCacheDeps) => T): T {
+    if (!this.cached) return fallback;
+    try {
+      return fn(this.cached);
+    } catch (err) {
+      this.cached.sync.handleError(err, userId, accountId, folder);
+      if (err instanceof CacheCorruptError) this.cached.sync.syncSoon(userId, accountId, folder);
+      return fallback;
+    }
+  }
+
+  /** The cached copy of a folder, if it is cached, filled and for this UIDVALIDITY (if given). */
+  private cachedFolder(userId: string, accountId: string, folder: string, uidValidity?: string): CachedFolder | null {
+    return this.fromCache(userId, accountId, folder, null, ({ sync }) => {
+      const f = sync.ready(userId, accountId, folder);
+      return f && (uidValidity === undefined || f.uidValidity === uidValidity) ? f : null;
+    });
+  }
+
+  /** Keep the cache of INBOX and Sent of an account up to date (called when its INBOX is watched). */
+  syncAccount(userId: string, accountId: string) {
+    this.fromCache(userId, accountId, 'INBOX', undefined, ({ sync }) => sync.syncAccount(userId, accountId));
+  }
+
+  /** Something changed in a folder: if it is cached, sync it soon. */
+  folderChanged(userId: string, accountId: string, folder: string) {
+    this.fromCache(userId, accountId, folder, undefined, ({ sync }) => sync.syncSoon(userId, accountId, folder));
+  }
+
+  /** Apply a change we just made on the IMAP server to the cached copy of the folder, if there is one. */
+  private updateCache(userId: string, accountId: string, folder: string, uidValidity: string, fn: (cache: MailCache, f: CachedFolder) => void) {
+    const f = this.cachedFolder(userId, accountId, folder, uidValidity);
+    if (f) this.fromCache(userId, accountId, folder, undefined, ({ cache }) => fn(cache, f));
+  }
+
+  /** Forget everything cached for an account (deleted, or now pointing at another mailbox). */
+  forgetAccount(userId: string, accountId: string) {
+    this.fromCache(userId, accountId, 'INBOX', undefined, ({ cache }) => cache.dropAccount(userId, accountId));
+  }
 
   // ---- folders -------------------------------------------------------------
 
@@ -311,6 +356,34 @@ export class MailService {
   }
 
   /**
+   * A page of `source` from the cache, or null if the cache can't answer it: the folder isn't
+   * cached (or not filled yet), there is a text search (always done by the IMAP server), or the
+   * page reaches below the oldest cached message. Also makes a background sync check for news.
+   */
+  private cachedSourcePage(userId: string, source: ListSource, cursor: AccountCursor | undefined, limit: number, filter: ListFilter): SourcePage | null {
+    if (!this.cached || filter.text) return null;
+    const { accountId, folder } = source;
+    return this.fromCache(userId, accountId, folder, null, ({ cache, sync }) => {
+      const f = sync.ready(userId, accountId, folder);
+      if (!f) {
+        // Not cached yet: start filling it if it is INBOX or Sent (the IMAP server answers meanwhile).
+        if (folder === 'INBOX' || cache.folder(userId, accountId, folder)) sync.syncAccount(userId, accountId);
+        return null;
+      }
+      let reset = false;
+      if (cursor && cursor.uidValidity !== f.uidValidity) {
+        reset = true;
+        cursor = undefined;
+      }
+      const empty: SourcePage = { source, uidValidity: f.uidValidity, items: [], exhausted: true, reset };
+      if (cursor?.done) return empty;
+      const rows = cache.page(f, cursor?.beforeUid ?? null, limit, filter.unread);
+      if (rows.length < limit && !f.complete) return null;
+      return { source, uidValidity: f.uidValidity, items: rows.map((m) => cachedItem(source, f.uidValidity, m)), exhausted: rows.length < limit, reset };
+    });
+  }
+
+  /**
    * Messages in `source` that match any of `terms` (see related.ts). Header searches can be slow
    * on big folders, so the RelatedIndex remembers results and later only searches new mail.
    */
@@ -334,9 +407,9 @@ export class MailService {
       }
       const uids = [...candidates].sort((a, b) => b - a).slice(0, MAX_RELATED);
       const msgs = uids.length ? await client.fetchAll(uids.join(','), LIST_FETCH, { uid: true }) : [];
-      const found = msgs.map((msg) => ({ uid: msg.uid, headers: threadHeaders(msg), msg }));
+      const found = msgs.map((msg) => fetchedItem(source, uidValidity, msg));
       this.relatedIndex.record(key, uidValidity, uidNext, terms, searched, found);
-      return found.filter((f) => terms.some((t) => matchesTerm(t, f.headers))).map((f) => fetchedItem(source, uidValidity, f.msg));
+      return found.filter((f) => terms.some((t) => matchesTerm(t, f.headers)));
     });
   }
 
@@ -351,25 +424,33 @@ export class MailService {
       const k = sourceKey(it.source);
       bySource.set(k, [...(bySource.get(k) ?? []), it]);
     }
-    const listed = new Set(picked.map((it) => `${sourceKey(it.source)}\u0000${it.msg.uid}`));
+    const listed = new Set(picked.map((it) => `${sourceKey(it.source)}\u0000${it.uid}`));
     const out = new Map<string, FetchedItem>();
     await Promise.all(
       [...bySource.values()].map(async (group) => {
         const { accountId, folder } = group[0]!.source;
         try {
-          const [sent, drafts] = await Promise.all([
-            this.specialFolder(userId, accountId, 'sent'),
-            this.specialFolder(userId, accountId, 'drafts'),
-          ]);
-          if (folder === drafts) return;
           const terms = new Map<string, LookupTerm>();
-          for (const it of group) for (const t of lookupTerms(threadHeaders(it.msg))) terms.set(termKey(t), t);
+          for (const it of group) for (const t of lookupTerms(it.headers)) terms.set(termKey(t), t);
           if (terms.size === 0) return;
-          for (const f of new Set([folder, ...(sent ? [sent] : [])])) {
+          // A cached folder is INBOX or Sent, never Drafts, and its account's Sent folder is
+          // known without asking the IMAP server.
+          const cachedSent = this.cachedFolderList(userId, accountId, folder);
+          let lookIn: string[];
+          if (cachedSent) lookIn = cachedSent;
+          else {
+            const [sent, drafts] = await Promise.all([
+              this.specialFolder(userId, accountId, 'sent'),
+              this.specialFolder(userId, accountId, 'drafts'),
+            ]);
+            if (folder === drafts) return;
+            lookIn = [...new Set([folder, ...(sent ? [sent] : [])])];
+          }
+          for (const f of lookIn) {
             const source = { accountId, folder: f };
-            const items = await this.findByTerms(userId, source, [...terms.values()]).catch(() => [] as FetchedItem[]);
+            const items = await this.findRelated(userId, source, [...terms.values()]).catch(() => [] as FetchedItem[]);
             for (const it of items) {
-              const k = `${sourceKey(source)}\u0000${it.msg.uid}`;
+              const k = `${sourceKey(source)}\u0000${it.uid}`;
               if (!listed.has(k)) out.set(k, it);
             }
           }
@@ -381,10 +462,60 @@ export class MailService {
     return [...out.values()];
   }
 
+  /**
+   * Where the rest of the conversations of a listed cached folder are: the folder and the
+   * account's Sent folder, if both are cached. Null if the IMAP server has to be asked.
+   */
+  private cachedFolderList(userId: string, accountId: string, folder: string): string[] | null {
+    return this.fromCache(userId, accountId, folder, null, ({ cache, sync }) => {
+      const listed = sync.ready(userId, accountId, folder);
+      const sent = cache.folderByRole(userId, accountId, 'sent');
+      if (!listed || !sent || sent.syncedAt === 0) return null;
+      return [...new Set([folder, sent.path])];
+    });
+  }
+
+  /**
+   * Before listing cached folders: make sure they (and the Sent folder their conversations come
+   * from) are up to date, unless they are known to be. See CacheSync.beforeListing.
+   */
+  private async prepareCached(userId: string, sources: ListSource[], filter: ListFilter, fresh: boolean) {
+    if (!this.cached || filter.text) return;
+    const { cache, sync } = this.cached;
+    await Promise.all(
+      sources.map(async ({ accountId, folder }) => {
+        try {
+          if (!sync.ready(userId, accountId, folder)) return;
+          const sent = cache.folderByRole(userId, accountId, 'sent');
+          const others = sent && sent.path !== folder ? [sent.path] : [];
+          if (!fresh && sync.isCurrent(userId, accountId, folder)) {
+            // Nothing tells us about changes in Sent; have a look in the background now and then.
+            for (const p of others) sync.refreshIfOlder(userId, accountId, p, SENT_REFRESH_MS);
+            return;
+          }
+          await sync.beforeListing(userId, accountId, [folder, ...others], { force: fresh });
+        } catch (err) {
+          sync.handleError(err, userId, accountId, folder);
+        }
+      }),
+    );
+  }
+
+  /** Messages of a folder matching conversation terms: from the cache if it has the folder, else by IMAP search. */
+  private async findRelated(userId: string, source: ListSource, terms: LookupTerm[]): Promise<FetchedItem[]> {
+    const fromCache = this.fromCache(userId, source.accountId, source.folder, null, ({ cache, sync }) => {
+      const f = sync.ready(userId, source.accountId, source.folder);
+      return f ? cache.related(f, terms, MAX_RELATED).map((m) => cachedItem(source, f.uidValidity, m)) : null;
+    });
+    return fromCache ?? this.findByTerms(userId, source, terms);
+  }
+
+  /** Snippets of messages fetched from the IMAP server (cached ones already have theirs). */
   private async snippets(userId: string, items: FetchedItem[]): Promise<Map<FetchedItem, string>> {
     const out = new Map<FetchedItem, string>();
     const bySource = new Map<string, FetchedItem[]>();
     for (const it of items) {
+      if (!it.msg) continue;
       const k = sourceKey(it.source);
       bySource.set(k, [...(bySource.get(k) ?? []), it]);
     }
@@ -392,31 +523,9 @@ export class MailService {
       [...bySource.values()].map(async (group) => {
         const { accountId, folder } = group[0]!.source;
         try {
-          await this.pool.withMailbox(userId, accountId, folder, async (client) => {
-            const byPart = new Map<string, { part: TextPart; items: FetchedItem[] }>();
-            for (const it of group) {
-              const part = findTextPart(it.msg.bodyStructure);
-              if (!part) continue;
-              const k = `${part.part}|${part.type}|${part.encoding}|${part.charset}`;
-              const e = byPart.get(k) ?? { part, items: [] };
-              e.items.push(it);
-              byPart.set(k, e);
-            }
-            for (const { part, items: partItems } of byPart.values()) {
-              const byUid = new Map(partItems.map((i) => [i.msg.uid, i]));
-              const fetched = await client.fetchAll(
-                partItems.map((i) => i.msg.uid).join(','),
-                { uid: true, bodyParts: [{ key: part.part, start: 0, maxLength: SNIPPET_FETCH_BYTES }] },
-                { uid: true },
-              );
-              for (const f of fetched) {
-                const it = byUid.get(f.uid);
-                const buf = f.bodyParts ? [...f.bodyParts.values()][0] : undefined;
-                if (!it || !buf) continue;
-                out.set(it, snippetFromPart(buf, part, (f.binaryParts?.size ?? 0) > 0));
-              }
-            }
-          });
+          const byUid = new Map(group.map((it) => [it.uid, it]));
+          const snippets = await this.pool.withMailbox(userId, accountId, folder, (client) => fetchSnippets(client, group.map((it) => it.msg!)));
+          for (const [uid, snippet] of snippets) out.set(byUid.get(uid)!, snippet);
         } catch {
           /* snippets are best-effort */
         }
@@ -426,28 +535,7 @@ export class MailService {
   }
 
   private toSummary(it: FetchedItem, snippet: string): MessageSummary {
-    const { msg } = it;
-    const env = msg.envelope ?? {};
-    const flags = msg.flags ?? new Set<string>();
-    const date = toDate(env.date) ?? toDate(msg.internalDate) ?? new Date(0);
-    return {
-      accountId: it.source.accountId,
-      folder: it.source.folder,
-      uid: msg.uid,
-      uidValidity: it.uidValidity,
-      ...threadHeaders(msg),
-      subject: env.subject ?? '',
-      from: addresses(env.from),
-      to: addresses(env.to),
-      date: date.toISOString(),
-      snippet,
-      seen: flags.has('\\Seen'),
-      flagged: flags.has('\\Flagged'),
-      answered: flags.has('\\Answered'),
-      draft: flags.has('\\Draft'),
-      hasAttachments: hasAttachments(msg.bodyStructure),
-      size: msg.size ?? 0,
-    };
+    return it.summary ? { ...it.summary } : summaryOf(it.source, it.uidValidity, it.msg!, snippet);
   }
 
   /**
@@ -461,14 +549,17 @@ export class MailService {
     rawCursor: string | null,
     limit: number,
     filter: ListFilter = NO_FILTER,
+    /** fresh: the user asked to refresh, so cached folders are checked with the server first (see prepareCached). */
+    opts: { fresh?: boolean } = {},
   ): Promise<MessageListResponse> {
     const previous = decodeCursor(rawCursor);
     const errors: MessageListResponse['errors'] = [];
+    await this.prepareCached(userId, sources, filter, !!opts.fresh);
     const pages = (
       await Promise.all(
         sources.map(async (s) => {
           try {
-            return await this.fetchSourcePage(userId, s, previous[sourceKey(s)], limit, filter);
+            return this.cachedSourcePage(userId, s, previous[sourceKey(s)], limit, filter) ?? (await this.fetchSourcePage(userId, s, previous[sourceKey(s)], limit, filter));
           } catch (err) {
             errors.push({ accountId: s.accountId, error: describeError(err, 'IMAP').message });
             return null;
@@ -513,6 +604,27 @@ export class MailService {
     ref: MessageRef,
     maxBytes: number,
   ): Promise<{ raw: Buffer; flags: Set<string>; internalDate: Date | null }> {
+    const f = this.cachedFolder(userId, ref.accountId, ref.folder, ref.uidValidity);
+    if (f) {
+      const hit = this.fromCache(userId, ref.accountId, ref.folder, null, ({ cache }) => {
+        const m = cache.message(f, ref.uid);
+        const raw = m && cache.body(f, ref.uid);
+        return m && raw ? { raw, flags: imapFlags(m.summary), internalDate: toDate(m.internalDate ?? undefined) } : null;
+      });
+      if (hit) return hit;
+    }
+    const res = await this.fetchRawLive(userId, ref, maxBytes);
+    if (f && this.cached && res.raw.length <= this.cached.maxBodyBytes && this.cached.bodyBytesPerAccount > 0) {
+      const { bodyBytesPerAccount } = this.cached;
+      this.fromCache(userId, ref.accountId, ref.folder, undefined, ({ cache }) => {
+        cache.putBody(f, ref.uid, res.raw);
+        cache.enforceBodyBudget(userId, ref.accountId, bodyBytesPerAccount);
+      });
+    }
+    return res;
+  }
+
+  private async fetchRawLive(userId: string, ref: MessageRef, maxBytes: number): Promise<{ raw: Buffer; flags: Set<string>; internalDate: Date | null }> {
     return this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox) => {
       this.checkValidity(mailbox, ref);
       const meta = await client.fetchOne(String(ref.uid), { uid: true, flags: true, internalDate: true, size: true }, { uid: true });
@@ -643,6 +755,10 @@ export class MailService {
       const res = await client.messageMove(uid, 'INBOX', { uid: true });
       return { ...info, uid: (res ? res.uidMap?.get(ref.uid) : undefined) ?? null, uidValidity: (res ? res.uidValidity?.toString() : undefined) ?? null };
     });
+    if (moved) {
+      this.updateCache(userId, ref.accountId, ref.folder, ref.uidValidity, (cache, f) => cache.removeMessages(f, [ref.uid]));
+      this.folderChanged(userId, ref.accountId, 'INBOX');
+    }
     if (!moved || (moved.uid && moved.uidValidity) || !moved.messageId) return moved;
     // No UIDPLUS: find the message in INBOX by Message-ID.
     const id = moved.messageId;
@@ -714,6 +830,12 @@ export class MailService {
       }
     });
 
+    if (action.type === 'seen' || action.type === 'flagged') {
+      this.updateCache(userId, accountId, folder, uidValidity, (cache, f) => cache.changeFlag(f, uids, action.type as 'seen' | 'flagged', action.value));
+    } else {
+      this.updateCache(userId, accountId, folder, uidValidity, (cache, f) => cache.removeMessages(f, uids));
+      if (destination) this.folderChanged(userId, accountId, destination);
+    }
     if (expunge) return { ...none, permanent: true };
     if (!moved || !destination) return { ...none, createdFolder };
     let newUids = moved.res && moved.res.uidMap ? [...moved.res.uidMap.values()] : [];
@@ -744,13 +866,16 @@ export class MailService {
         if (mailbox.uidValidity.toString() !== ref.uidValidity) return;
         await client.messageFlagsAdd(String(ref.uid), ['\\Answered'], { uid: true });
       });
+      this.updateCache(userId, ref.accountId, ref.folder, ref.uidValidity, (cache, f) => cache.changeFlag(f, [ref.uid], 'answered', true));
     } catch {
       /* not critical */
     }
   }
 
   async append(userId: string, accountId: string, folder: string, raw: Buffer, flags: string[]) {
-    return this.pool.withClient(userId, accountId, (client) => client.append(folder, raw, flags));
+    const res = await this.pool.withClient(userId, accountId, (client) => client.append(folder, raw, flags));
+    this.folderChanged(userId, accountId, folder);
+    return res;
   }
 
   async deleteDraft(userId: string, ref: MessageRef) {
@@ -758,5 +883,6 @@ export class MailService {
       if (mailbox.uidValidity.toString() !== ref.uidValidity) return;
       await client.messageDelete(String(ref.uid), { uid: true });
     });
+    this.updateCache(userId, ref.accountId, ref.folder, ref.uidValidity, (cache, f) => cache.removeMessages(f, [ref.uid]));
   }
 }

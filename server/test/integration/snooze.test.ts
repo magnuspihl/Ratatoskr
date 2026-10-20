@@ -48,8 +48,9 @@ async function api<T>(method: 'GET' | 'POST' | 'DELETE', url: string, body?: unk
   return { status: res.statusCode, json: JSON.parse(res.body) as T };
 }
 
+// fresh=1, as after Refresh: mail delivered by another client may not have been reported by IDLE yet.
 const list = async (folder: string) =>
-  (await api<ListResponse>('GET', `/api/messages?accountId=${account.id}&folder=${encodeURIComponent(folder)}&limit=200`)).json.messages;
+  (await api<ListResponse>('GET', `/api/messages?accountId=${account.id}&folder=${encodeURIComponent(folder)}&limit=200&fresh=1`)).json.messages;
 const find = async (folder: string, subject: string) => (await list(folder)).find((m) => m.subject === subject);
 const snooze = (msgs: MessageSummary[], until: Date | string) =>
   api<ActionResult>('POST', '/api/messages/actions', { messages: msgs, action: { type: 'snooze', until: typeof until === 'string' ? until : until.toISOString() } });
