@@ -1,0 +1,102 @@
+name: Release
+
+# Releases are manual; pushes to main only run CI. To ship, run this workflow from the Actions tab
+# (Release → Run workflow) and pick a version bump. That bumps off the last v* tag, creates the
+# tag and a GitHub Release, and pushes the image to ghcr.io/<owner>/ratatoskr as:
+#   1.2.3, 1.2, 1 (from 1.0.0 on) and latest
+#
+# For a specific version number, push a tag instead:
+#   git tag v1.2.3 && git push origin v1.2.3
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump'
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: read
+
+# Two releases at once would both bump off the same tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # A manual run from another branch would publish unreviewed code as latest.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Manual runs bump off the last release tag, so there's no need to look up the current
+      # version first. Tag pushes use the pushed tag verbatim. With no tags yet the base is
+      # 0.0.0, so the first release is 0.0.1, 0.1.0 or 1.0.0.
+      - name: Work out the version
+        id: version
+        env:
+          BUMP: ${{ github.event.inputs.bump }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$(scripts/release-version.sh bump "$BUMP")"
+          else
+            version="$(scripts/release-version.sh tag "$GITHUB_REF_NAME")"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:integration
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=v${{ steps.version.outputs.value }}
+            type=semver,pattern={{major}}.{{minor}},value=v${{ steps.version.outputs.value }}
+            type=semver,pattern={{major}},value=v${{ steps.version.outputs.value }}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Last, so a failed build never leaves a tag or release without an image behind it. For
+      # manual runs this also creates the tag, on the commit that was built.
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: >
+          gh release create "v$VERSION"
+          --target "$GITHUB_SHA"
+          --title "v$VERSION"
+          --generate-notes
+          --notes "Image: \`ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION\`"
