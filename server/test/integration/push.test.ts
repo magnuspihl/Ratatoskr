@@ -148,6 +148,22 @@ describe('phone notifications for new mail', () => {
     expect(sent[0]!.subscription.endpoint).toBe(phone.endpoint);
   });
 
+  it('closes the notification on the phone once the message is read in Ratatoskr', async () => {
+    sent.length = 0;
+    await deliver('Read me in the app');
+    expect(await until(() => titles().includes('Read me in the app'))).toBe(true);
+    const shown = sent.find((r) => (r.payload as NotificationPayload).body === 'Read me in the app')!.payload as NotificationPayload;
+    const [, uidValidity, uid] = decodeURIComponent(shown.url.split('open=')[1]!).split('.').slice(-3);
+    sent.length = 0;
+    const res = await api('POST', '/api/messages/actions', {
+      messages: [{ accountId: account.id, folder: 'INBOX', uidValidity, uid: Number(uid) }],
+      action: { type: 'seen', value: true },
+    });
+    expect(res.status).toBe(200);
+    expect(await until(() => sent.length > 0)).toBe(true);
+    expect(sent[0]!.payload).toMatchObject({ type: 'clear', tags: [shown.tag] });
+  });
+
   it('sends a test notification to the device', async () => {
     sent.length = 0;
     expect((await api<{ delivered: number }>('POST', '/api/push/test')).json).toEqual({ delivered: 1 });

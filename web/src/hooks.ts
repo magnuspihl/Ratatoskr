@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClientEvent, MessageAction, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
 import { api, type MailboxSel } from './api';
 import { actionsPending, runMessageAction, updateMessageLists, type ActionOutcome } from './messageActions';
+import { closeNotifications } from './push';
 import { applyThemeColor } from './themeColor';
 
 export const useMe = () => useQuery({ queryKey: ['me'], queryFn: api.me, retry: false, staleTime: Infinity });
@@ -36,7 +37,10 @@ export function useMessageCache() {
 export function useMessageAction(onError: (msg: string) => void) {
   const qc = useQueryClient();
   return useCallback(
-    (refs: MessageRef[], action: MessageAction): Promise<ActionOutcome> => runMessageAction(qc, refs, action, { send: api.action, onError }),
+    (refs: MessageRef[], action: MessageAction): Promise<ActionOutcome> => {
+      void closeNotifications(refs, action);
+      return runMessageAction(qc, refs, action, { send: api.action, onError });
+    },
     [qc, onError],
   );
 }

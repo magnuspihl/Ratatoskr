@@ -483,6 +483,9 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
             store.deleteSnoozes(userId, ref.accountId, ref.folder, ref.uidValidity, uids);
           }
         }
+        // Read, moved or deleted from the inbox here: close its notifications on the user's devices
+        // without waiting for the IDLE watcher, which not every IMAP server tells about it.
+        if (ref.folder.toUpperCase() === 'INBOX' && action.type !== 'flagged') push.inboxChanged(userId, ref.accountId);
         if (r.undo) result.undo.push(r.undo);
         if (r.permanent) result.permanent = true;
         if (r.createdFolder) result.createdFolders.push(r.createdFolder);

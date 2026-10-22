@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isIosDevice, notificationTarget, pushAvailability, sameServerKey, type PushEnvironment } from '../src/push';
+import { isIosDevice, notificationTarget, obsoleteNotificationTags, pushAvailability, sameServerKey, type PushEnvironment } from '../src/push';
 
 const desktop: PushEnvironment = {
   secure: true,
@@ -76,5 +76,28 @@ describe('where a tapped notification leads', () => {
     expect(notificationTarget('//evil.example/phish', origin)).toBeNull();
     expect(notificationTarget('javascript:alert(1)', origin)).toBeNull();
     expect(notificationTarget(42, origin)).toBeNull();
+  });
+});
+
+describe("closing this device's notifications after acting on mail in the app", () => {
+  const inbox = { accountId: 'acc1', folder: 'INBOX', uidValidity: '42', uid: 7 };
+
+  it('closes the notification for an inbox message that is marked read', () => {
+    expect(obsoleteNotificationTags([inbox, { ...inbox, uid: 8 }], { type: 'seen', value: true })).toEqual(['acc1:7', 'acc1:8']);
+  });
+
+  it('closes it when the message is archived, moved, deleted or snoozed', () => {
+    for (const action of [{ type: 'archive' }, { type: 'delete' }, { type: 'move', destination: 'Work' }, { type: 'snooze', until: '2030-01-01T08:00:00Z' }] as const) {
+      expect(obsoleteNotificationTags([inbox], action)).toEqual(['acc1:7']);
+    }
+  });
+
+  it('leaves it alone when the message is marked unread or flagged', () => {
+    expect(obsoleteNotificationTags([inbox], { type: 'seen', value: false })).toEqual([]);
+    expect(obsoleteNotificationTags([inbox], { type: 'flagged', value: true })).toEqual([]);
+  });
+
+  it('ignores messages outside the inbox, which never have notifications', () => {
+    expect(obsoleteNotificationTags([{ ...inbox, folder: 'Archive' }], { type: 'seen', value: true })).toEqual([]);
   });
 });
