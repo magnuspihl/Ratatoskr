@@ -1,10 +1,9 @@
-import { useInfiniteQuery, useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ActionResult, ClientEvent, ListResponse, MessageAction, MessageDetail, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
-import { undoPlan, type UndoStep } from './swipe';
+import type { ClientEvent, MessageAction, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
 import { api, type MailboxSel } from './api';
+import { actionsPending, runMessageAction, updateMessageLists, type ActionOutcome } from './messageActions';
 import { applyThemeColor } from './themeColor';
-import { refKey } from './util';
 
 export const useMe = () => useQuery({ queryKey: ['me'], queryFn: api.me, retry: false, staleTime: Infinity });
 export const useAccounts = () => useQuery({ queryKey: ['accounts'], queryFn: api.accounts, staleTime: 60_000 });
@@ -24,80 +23,21 @@ export function useMessages(sel: MailboxSel, q: string, unread: boolean, enabled
   });
 }
 
-type MessagesData = InfiniteData<ListResponse, string | null>;
-
 /** Apply a transformation to every cached message list (optimistic updates). */
 export function useMessageCache() {
   const qc = useQueryClient();
-  return useCallback(
-    (fn: (m: MessageSummary) => MessageSummary | null) => {
-      qc.setQueriesData<MessagesData>({ queryKey: ['messages'] }, (data) =>
-        data
-          ? {
-              ...data,
-              pages: data.pages.map((p) => ({
-                ...p,
-                messages: p.messages.map(fn).filter((m): m is MessageSummary => m !== null),
-                related: (p.related ?? []).map(fn).filter((m): m is MessageSummary => m !== null),
-              })),
-            }
-          : data,
-      );
-    },
-    [qc],
-  );
+  return useCallback((fn: (m: MessageSummary) => MessageSummary | null) => updateMessageLists(qc, fn), [qc]);
 }
 
 /**
  * Run a message action with an optimistic cache update and a refetch afterwards. Resolves with a
- * plan to undo it (null if it failed or can't be undone).
+ * plan to undo it (null if it failed or can't be undone). See messageActions.ts.
  */
 export function useMessageAction(onError: (msg: string) => void) {
   const qc = useQueryClient();
-  const update = useMessageCache();
   return useCallback(
-    async (refs: MessageRef[], action: MessageAction): Promise<{ ok: boolean; result: ActionResult | null; undo: UndoStep[] | null }> => {
-      if (refs.length === 0) return { ok: true, result: null, undo: null };
-      const keys = new Set(refs.map(refKey));
-      const hit = (m: MessageSummary) => keys.has(refKey(m));
-
-      // Previous flag values, so read/flag changes can be undone exactly.
-      const before = new Map<string, MessageSummary>();
-      for (const [, data] of qc.getQueriesData<MessagesData>({ queryKey: ['messages'] })) {
-        for (const p of data?.pages ?? []) for (const m of [...p.messages, ...(p.related ?? [])]) if (hit(m)) before.set(refKey(m), m);
-      }
-
-      if (action.type === 'seen' || action.type === 'flagged') {
-        const field = action.type;
-        update((m) => (hit(m) ? { ...m, [field]: action.value } : m));
-        // Keep open message details in sync as well.
-        qc.setQueriesData<MessageDetail>({ queryKey: ['message'] }, (d) =>
-          d && keys.has(refKey(d)) ? { ...d, [field]: action.value } : d,
-        );
-      } else if (action.type === 'snooze') {
-        // Already snoozed (in the Snoozed folder): only the time changes. Anything else leaves the list.
-        update((m) => (hit(m) ? (m.snoozedUntil ? { ...m, snoozedUntil: action.until } : null) : m));
-        qc.setQueriesData<MessageDetail>({ queryKey: ['message'] }, (d) =>
-          d && keys.has(refKey(d)) && d.snoozedUntil ? { ...d, snoozedUntil: action.until } : d,
-        );
-      } else update((m) => (hit(m) ? null : m));
-      try {
-        const result = await api.action(refs, action);
-        const undo = undoPlan(action, refs, result, (r) => {
-          const m = before.get(refKey(r));
-          if (!m) return undefined;
-          return action.type === 'seen' ? m.seen : action.type === 'flagged' ? m.flagged : undefined;
-        });
-        return { ok: true, result, undo };
-      } catch (err) {
-        onError((err as Error).message);
-        return { ok: false, result: null, undo: null };
-      } finally {
-        void qc.invalidateQueries({ queryKey: ['messages'] });
-        void qc.invalidateQueries({ queryKey: ['folders'] });
-      }
-    },
-    [qc, update, onError],
+    (refs: MessageRef[], action: MessageAction): Promise<ActionOutcome> => runMessageAction(qc, refs, action, { send: api.action, onError }),
+    [qc, onError],
   );
 }
 
@@ -121,7 +61,9 @@ export function useLiveUpdates(enabled: boolean, onSnoozeEnded?: (ev: SnoozeEnde
     const refresh = () => {
       if (timer.current) window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => {
-        void qc.invalidateQueries({ queryKey: ['messages'] });
+        // While actions are under way the last one to finish refetches; a list fetched now could
+        // still show what they are removing.
+        if (!actionsPending(qc)) void qc.invalidateQueries({ queryKey: ['messages'] });
         void qc.invalidateQueries({ queryKey: ['folders'] });
       }, 400);
     };
