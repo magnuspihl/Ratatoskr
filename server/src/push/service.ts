@@ -61,6 +61,11 @@ export interface PushServiceOptions {
   unreadInInbox?: (userId: string, accountId: string, uidValidity: string, uids: number[]) => Promise<Set<number>>;
   /** How long to wait for more INBOX changes before checking (several flags often change at once). */
   clearDelayMs?: number;
+  /**
+   * How often to check anyway while notifications are showing: not every IMAP server reports flag
+   * changes made by other clients to the IDLE connection.
+   */
+  recheckMs?: number;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -87,6 +92,7 @@ export class PushService {
   private readonly shown = new Map<string, Map<string, Shown>>();
   private readonly clearTimers = new Map<string, NodeJS.Timeout>();
   private readonly clearing = new Map<string, Promise<void>>();
+  private readonly recheckTimers = new Map<string, NodeJS.Timeout>();
 
   constructor(private readonly opts: PushServiceOptions) {}
 
@@ -139,14 +145,28 @@ export class PushService {
     }
     if (byTag.size > 0) this.shown.set(userId, byTag);
     else this.shown.delete(userId);
+    this.scheduleRecheck(userId, accountId);
+  }
+
+  /** While the account has notifications showing, checks them now and then (see `recheckMs`). */
+  private scheduleRecheck(userId: string, accountId: string) {
+    const key = `${userId}:${accountId}`;
+    if (!this.opts.unreadInInbox || this.recheckTimers.has(key) || this.showingFor(userId, accountId).length === 0) return;
+    const timer = setTimeout(() => {
+      this.recheckTimers.delete(key);
+      void this.clearRead(userId, accountId).then(() => this.scheduleRecheck(userId, accountId));
+    }, this.opts.recheckMs ?? 120_000);
+    timer.unref();
+    this.recheckTimers.set(key, timer);
   }
 
   /**
-   * Something changed in an account's INBOX (flags, or messages removed). After a short pause,
-   * closes notifications on the user's devices whose messages are now all read or gone.
+   * Something changed in an account's INBOX (flags, or messages removed), reported by the IDLE
+   * watcher or done through the app. After a short pause, closes notifications on the user's
+   * devices whose messages are now all read or gone.
    */
   inboxChanged(userId: string, accountId: string) {
-    if (!this.opts.unreadInInbox || !this.showingFor(userId, accountId)) return;
+    if (!this.opts.unreadInInbox || this.showingFor(userId, accountId).length === 0) return;
     const key = `${userId}:${accountId}`;
     if (this.clearTimers.has(key)) return;
     const timer = setTimeout(() => {

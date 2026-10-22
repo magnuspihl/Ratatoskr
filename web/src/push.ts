@@ -1,3 +1,4 @@
+import type { MessageAction, MessageRef } from '../../shared/types';
 import { api } from './api';
 
 /**
@@ -139,4 +140,28 @@ export function setAppBadge(count: number) {
   const nav = navigator as Navigator & { setAppBadge?: (n: number) => Promise<void>; clearAppBadge?: () => Promise<void> };
   if (!nav.setAppBadge || !nav.clearAppBadge) return;
   void (count > 0 ? nav.setAppBadge(count) : nav.clearAppBadge()).catch(() => {});
+}
+
+/**
+ * Tags of this device's new-mail notifications that `action` makes obsolete: the message was read,
+ * or left the inbox. Same tags as buildNotification in server/src/push/notify.ts. Summaries of
+ * several messages are left to the server, which knows whether the others are still unread.
+ */
+export function obsoleteNotificationTags(refs: MessageRef[], action: MessageAction): string[] {
+  const done = action.type === 'seen' ? action.value : ['move', 'archive', 'delete', 'snooze'].includes(action.type);
+  if (!done) return [];
+  return refs.filter((r) => r.folder.toUpperCase() === 'INBOX').map((r) => `${r.accountId}:${r.uid}`);
+}
+
+/**
+ * Close this device's notifications about messages the user just dealt with in the app. The
+ * server also asks every device to do so, but that takes a round trip through the push service,
+ * and Apple's push service never gets those requests.
+ */
+export async function closeNotifications(refs: MessageRef[], action: MessageAction): Promise<void> {
+  const tags = new Set(obsoleteNotificationTags(refs, action));
+  if (tags.size === 0) return;
+  const reg = await registration().catch(() => null);
+  if (!reg || typeof reg.getNotifications !== 'function') return;
+  for (const n of await reg.getNotifications().catch(() => [])) if (tags.has(n.tag)) n.close();
 }

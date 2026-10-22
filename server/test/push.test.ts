@@ -257,7 +257,7 @@ describe('sending new-mail notifications', () => {
 
 describe('clearing notifications when the mail is read elsewhere', () => {
   /** `unread` is what the IMAP server says is still unread in INBOX (UIDVALIDITY 42). */
-  function setup(opts: { unread?: Set<number>; badge?: number } = {}) {
+  function setup(opts: { unread?: Set<number>; badge?: number; recheckMs?: number } = {}) {
     const s = store();
     const user = s.upsertUser('iss', 'u', '', '');
     const acc = s.createAccount(user.id, accountInput);
@@ -274,6 +274,7 @@ describe('clearing notifications when the mail is read elsewhere', () => {
         return uidValidity === '42' ? new Set(uids.filter((u) => state.unread.has(u))) : new Set();
       },
       clearDelayMs: 10,
+      recheckMs: opts.recheckMs ?? 60_000,
     });
     s.addPushSubscription(user.id, sub('phone'));
     const clears = () => sent.filter((r) => (r.payload as { type?: string }).type === 'clear').map((r) => r.payload);
@@ -330,6 +331,26 @@ describe('clearing notifications when the mail is read elsewhere', () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(state.checks).toBe(1);
     expect(clears()).toHaveLength(1);
+  });
+
+  it('notices a message read elsewhere even when the mail server never reports the change', async () => {
+    const { user, acc, push, state, clears } = setup({ unread: new Set([5]), recheckMs: 20 });
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(clears()).toEqual([]);
+    state.unread.delete(5);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(clears()).toEqual([{ type: 'clear', tags: [`${acc.id}:5`] }]);
+  });
+
+  it('stops checking on its own once no notification is showing', async () => {
+    const { user, acc, push, state } = setup({ recheckMs: 20 });
+    await push.notifyNewMail(user.id, acc.id, [mail(5, 'Alice', 'Hi')]);
+    await new Promise((r) => setTimeout(r, 60));
+    const checks = state.checks;
+    expect(checks).toBe(1);
+    await new Promise((r) => setTimeout(r, 80));
+    expect(state.checks).toBe(checks);
   });
 
   it('never sends a clear message to Apple devices, which would revoke the subscription', async () => {
