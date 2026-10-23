@@ -296,6 +296,17 @@ svg { flex-shrink: 0; }
 .attachment:hover { border-color: var(--border-strong); background: var(--hover); }
 .attachment .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attachment .fsize { color: var(--muted); font-size: 12px; }
+.attachments .attachment { position: relative; overflow: hidden; }
+.attachment > svg, .attachment > span:not(.attachment-progress) { position: relative; }
+.attachment.downloading { cursor: progress; border-color: var(--accent); }
+.attachment.saved { border-color: var(--success); }
+.attachment.failed { border-color: var(--danger); }
+.attachment .attachment-progress {
+  position: absolute; inset: 0 auto 0 0; background: var(--accent); opacity: 0.15; transition: width 0.15s linear;
+}
+.attachment .spin { animation: spin 0.8s linear infinite; color: var(--accent); }
+.attachment .ok { color: var(--success); }
+.attachment .err { color: var(--danger); }
 .attachment .remove { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0; display: grid; }
 .empty-reader { display: grid; place-items: center; height: 100%; color: var(--muted); text-align: center; gap: 8px; }
 .empty-reader svg { opacity: 0.4; }
