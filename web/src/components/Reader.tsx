@@ -3,11 +3,14 @@ import {
   AlarmClock,
   Archive,
   ArrowLeft,
+  Check,
+  CircleAlert,
   Download,
   Flag,
   FolderInput,
   Forward,
   ImageOff,
+  LoaderCircle,
   Mail,
   MailOpen,
   Paperclip,
@@ -18,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ConversationRow } from '../../../shared/threads';
-import type { AccountFolders, AccountView, DomainName, MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../../shared/types';
+import type { AccountFolders, AccountView, AttachmentView, DomainName, MessageAction, MessageDetail, MessageRef, MessageSummary } from '../../../shared/types';
 import { api, ApiError } from '../api';
 import type { ResolvedTheme } from '../hooks';
 import { displayName, formatFullDate, formatListDate, formatSize, refKey, toRef } from '../util';
@@ -28,6 +31,7 @@ import { MoveMenu } from './MoveMenu';
 import { SnoozeMenu } from './SnoozeMenu';
 import { formatSnoozeTime } from '../snooze';
 import { linkify } from '../mailto';
+import { downloadFile, downloadLabel, downloadPercent, type DownloadState } from '../download';
 
 /**
  * Plain-text body: React escapes everything; only http(s) URLs, mailto: links and email addresses
@@ -276,6 +280,60 @@ export function Reader({ openRef, conversation, account, multipleAccounts, folde
   );
 }
 
+/**
+ * An attachment to download. The server first fetches the whole message from the mail server, so
+ * the chip shows that it's working, then the progress, then that the file was saved (or why not).
+ */
+export function AttachmentChip({ url, attachment: a, initialState = { status: 'idle' } }: { url: string; attachment: AttachmentView; initialState?: DownloadState }) {
+  const [state, setState] = useState<DownloadState>(initialState);
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(resetTimer.current), []);
+  const active = state.status === 'preparing' || state.status === 'receiving';
+  const label = downloadLabel(state);
+  const pct = downloadPercent(state);
+  const start = () => {
+    if (active) return;
+    clearTimeout(resetTimer.current);
+    void downloadFile(url, a.filename, (s) => {
+      setState(s);
+      // "Saved" and errors fade back to the normal chip after a while.
+      if (s.status === 'done' || s.status === 'error') resetTimer.current = setTimeout(() => setState({ status: 'idle' }), s.status === 'done' ? 4000 : 8000);
+    });
+  };
+  const title = state.status === 'error' ? `Couldn't download ${a.filename}: ${state.message}` : active ? `Downloading ${a.filename}…` : `${a.filename} (${a.mimeType})`;
+  return (
+    <a
+      className={`attachment ${active ? 'downloading' : ''} ${state.status === 'done' ? 'saved' : ''} ${state.status === 'error' ? 'failed' : ''}`}
+      href={url}
+      download={a.filename}
+      title={title}
+      aria-busy={active}
+      onClick={(e) => {
+        // Modified clicks (new tab, save as…) keep the browser's own behaviour.
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        start();
+      }}
+    >
+      {pct !== null && <span className="attachment-progress" style={{ width: `${pct}%` }} />}
+      <Paperclip size={14} />
+      <span className="fname">{a.filename}</span>
+      <span className="fsize" aria-live="polite">
+        {label ?? formatSize(a.size)}
+      </span>
+      {active ? (
+        <LoaderCircle size={14} className="spin" />
+      ) : state.status === 'done' ? (
+        <Check size={14} className="ok" />
+      ) : state.status === 'error' ? (
+        <CircleAlert size={14} className="err" />
+      ) : (
+        <Download size={14} className="muted" />
+      )}
+    </a>
+  );
+}
+
 /** One message of the open conversation: just a summary line when collapsed. */
 function MessageCard({
   msgRef,
@@ -450,12 +508,7 @@ function MessageCard({
           {d.attachments.length > 0 && (
             <div className="attachments">
               {d.attachments.map((a) => (
-                <a key={a.index} className="attachment" href={api.attachmentUrl(msgRef, a.index)} download={a.filename} title={`${a.filename} (${a.mimeType})`}>
-                  <Paperclip size={14} />
-                  <span className="fname">{a.filename}</span>
-                  <span className="fsize">{formatSize(a.size)}</span>
-                  <Download size={14} className="muted" />
-                </a>
+                <AttachmentChip key={a.index} url={api.attachmentUrl(msgRef, a.index)} attachment={a} />
               ))}
             </div>
           )}
