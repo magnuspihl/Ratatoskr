@@ -2,7 +2,7 @@ import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-quer
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClientEvent, MessageAction, MessageRef, MessageSummary, Preferences, ServerEvent } from '../../shared/types';
 import { api, type MailboxSel } from './api';
-import { actionsPending, runMessageAction, updateMessageLists, type ActionOutcome } from './messageActions';
+import { actionsPending, fetchMessageList, runMessageAction, updateMessageLists, type ActionOutcome } from './messageActions';
 import { closeNotifications } from './push';
 import { applyThemeColor } from './themeColor';
 
@@ -12,9 +12,10 @@ export const useFolders = (enabled: boolean) =>
   useQuery({ queryKey: ['folders'], queryFn: api.folders, enabled, staleTime: 30_000, refetchInterval: 120_000 });
 
 export function useMessages(sel: MailboxSel, q: string, unread: boolean, enabled: boolean) {
+  const qc = useQueryClient();
   return useInfiniteQuery({
     queryKey: ['messages', sel.accountId, sel.accountId ? sel.folder : '', q, unread],
-    queryFn: ({ pageParam }) => api.messages(sel, pageParam, q, unread),
+    queryFn: ({ pageParam }) => fetchMessageList(qc, () => api.messages(sel, pageParam, q, unread)),
     initialPageParam: null as string | null,
     getNextPageParam: (last) => last.cursor,
     enabled,
