@@ -1,7 +1,7 @@
 import { InfiniteQueryObserver, QueryClient } from '@tanstack/react-query';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ActionResult, ListResponse, MessageAction, MessageRef, MessageSummary } from '../../shared/types';
-import { actionsPending, runMessageAction, type MessagesData } from '../src/messageActions';
+import { actionsPending, fetchMessageList, runMessageAction, type MessagesData } from '../src/messageActions';
 
 const msg = (uid: number, over: Partial<MessageSummary> = {}): MessageSummary => ({
   accountId: 'a',
@@ -47,18 +47,20 @@ function setup(initial: MessageSummary[]) {
   qc.setQueryData<MessagesData>(queryKey, { pages: [page(initial)], pageParams: [null] });
   const observer = new InfiniteQueryObserver(qc, {
     queryKey,
-    queryFn: () => {
-      const d = deferred<ListResponse>();
-      answers.push(d);
-      return d.promise;
-    },
+    queryFn: () =>
+      fetchMessageList(qc, () => {
+        const d = deferred<ListResponse>();
+        answers.push(d);
+        return d.promise;
+      }),
     initialPageParam: null as string | null,
     getNextPageParam: () => null,
     staleTime: Infinity,
   });
   const stop = observer.subscribe(() => {});
+  const refetch = () => void observer.refetch();
   const shown = () => (qc.getQueryData<MessagesData>(queryKey)?.pages ?? []).flatMap((p) => p.messages.map((m) => m.subject));
-  return { qc, answers, shown, stop };
+  return { qc, answers, shown, stop, refetch };
 }
 
 let cleanup: (() => void) | null = null;
@@ -153,5 +155,77 @@ describe('message actions', () => {
     await flush();
     expect(shown()).toEqual(['Message 1']);
     expect(actionsPending(qc)).toBe(false);
+  });
+  it('keeps rapidly deleted messages hidden when a refresh that nothing held back is answered before the server deleted them', async () => {
+    const [a, b, c] = [msg(3), msg(2), msg(1)];
+    const { qc, answers, shown, stop, refetch } = setup([a, b, c]);
+    cleanup = stop;
+    const sends = [deferred<ActionResult>(), deferred<ActionResult>()];
+    const del: MessageAction = { type: 'delete' };
+    const first = runMessageAction(qc, [ref(a)], del, { send: () => sends[0]!.promise, onError: () => {} });
+    const second = runMessageAction(qc, [ref(b)], del, { send: () => sends[1]!.promise, onError: () => {} });
+    await flush();
+    expect(shown()).toEqual(['Message 1']);
+
+    // The window regains focus (or the periodic refresh fires) while both deletions are under way,
+    // and the server lists the folder before it has moved them.
+    refetch();
+    await flush();
+    expect(answers).toHaveLength(1);
+    answers[0]!.resolve(page([a, b, c]));
+    await flush();
+    expect(shown()).toEqual(['Message 1']);
+
+    sends[0]!.resolve(ok);
+    sends[1]!.resolve(ok);
+    await Promise.all([first, second]);
+    await flush();
+    answers[1]!.resolve(page([c]));
+    await flush();
+    expect(shown()).toEqual(['Message 1']);
+  });
+
+  it('keeps a read mark when a list requested while marking it read still says unread', async () => {
+    const a = msg(1);
+    const { qc, answers, stop, refetch } = setup([a]);
+    cleanup = stop;
+    const send = deferred<ActionResult>();
+    const marking = runMessageAction(qc, [ref(a)], { type: 'seen', value: true }, { send: () => send.promise, onError: () => {} });
+    await flush();
+    refetch();
+    await flush();
+    answers[0]!.resolve(page([a]));
+    await flush();
+    expect(qc.getQueryData<MessagesData>(['messages', 'a', 'INBOX', '', false])!.pages[0]!.messages[0]!.seen).toBe(true);
+    send.resolve(ok);
+    await marking;
+  });
+
+  it('believes lists requested after an action finished, such as a message marked unread again elsewhere', async () => {
+    const a = msg(1);
+    const { qc, answers, stop } = setup([a]);
+    cleanup = stop;
+    await runMessageAction(qc, [ref(a)], { type: 'seen', value: true }, { send: async () => ok, onError: () => {} });
+    await flush();
+    answers[0]!.resolve(page([{ ...a, seen: false }]));
+    await flush();
+    expect(qc.getQueryData<MessagesData>(['messages', 'a', 'INBOX', '', false])!.pages[0]!.messages[0]!.seen).toBe(false);
+  });
+
+  it('shows a message again when its deletion failed, even in a list requested while it was being deleted', async () => {
+    const a = msg(1);
+    const { qc, answers, shown, stop, refetch } = setup([a]);
+    cleanup = stop;
+    const send = deferred<ActionResult>();
+    const deleting = runMessageAction(qc, [ref(a)], { type: 'delete' }, { send: () => send.promise, onError: () => {} });
+    await flush();
+    refetch();
+    await flush();
+    send.reject(new Error('Mail server unreachable'));
+    await deleting;
+    await flush();
+    for (const d of answers) d.resolve(page([a]));
+    await flush();
+    expect(shown()).toEqual(['Message 1']);
   });
 });
