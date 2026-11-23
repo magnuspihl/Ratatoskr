@@ -18,6 +18,7 @@ import type { CacheSync } from '../cache/sync.js';
 import { decideRemoteImages, displayDomain } from '../mail/imageAllowlist.js';
 import { attachmentBytes, buildMessageDetail, parseRaw, type ParsedEmail } from '../mail/parse.js';
 import { collectRemoteImageUrls } from '../mail/sanitize.js';
+import { decodeText, decodeTransfer, findPart, LIGHT_LOAD_MIN_BYTES, MAX_BODY_PART_BYTES, PART_PATTERN, planMessage, type StructurePart } from '../mail/structure.js';
 import { inlineRemoteImages, type InlineOptions, type RemoteImageCache } from '../net/remoteImages.js';
 import { MailServerError, describeError } from './connect.js';
 import type { ImapPool } from './pool.js';
@@ -50,6 +51,20 @@ const NAME_FALLBACKS: Partial<Record<SpecialUse, RegExp>> = {
 };
 
 export class MessageGoneError extends Error {}
+
+type LoadedMessage =
+  | { kind: 'full'; raw: Buffer; flags: Set<string>; internalDate: Date | null }
+  | { kind: 'partial'; headers: Buffer; html: string | null; text: string | null; parts: StructurePart[]; flags: Set<string>; internalDate: Date | null };
+
+/**
+ * One body part, decoded per the BODYSTRUCTURE (not the part's MIME header, which some servers
+ * can't send on its own), reading at most `maxEncodedBytes` of it from the server.
+ */
+async function fetchPart(client: ImapFlow, uid: number, p: StructurePart, maxEncodedBytes: number): Promise<Buffer | null> {
+  const msg = await client.fetchOne(String(uid), { uid: true, bodyParts: [{ key: p.part, start: 0, maxLength: maxEncodedBytes }] }, { uid: true });
+  const raw = msg ? msg.bodyParts?.get(p.part) : undefined;
+  return raw ? decodeTransfer(raw, p.encoding) : null;
+}
 export class StaleError extends Error {}
 
 export interface ListSource {
@@ -599,28 +614,38 @@ export class MailService {
     await this.pool.withMailbox(userId, ref.accountId, ref.folder, async (_client, mailbox) => this.checkValidity(mailbox, { ...ref, uid: 0 }));
   }
 
+  /** The raw message from the local cache, if it is there. */
+  private cachedRaw(userId: string, ref: MessageRef): { raw: Buffer; flags: Set<string>; internalDate: Date | null } | null {
+    const f = this.cachedFolder(userId, ref.accountId, ref.folder, ref.uidValidity);
+    if (!f) return null;
+    return this.fromCache(userId, ref.accountId, ref.folder, null, ({ cache }) => {
+      const m = cache.message(f, ref.uid);
+      const raw = m && cache.body(f, ref.uid);
+      return m && raw ? { raw, flags: imapFlags(m.summary), internalDate: toDate(m.internalDate ?? undefined) } : null;
+    });
+  }
+
+  /** Keep a message just downloaded in the local cache, if its folder is cached and it is small enough. */
+  private storeRaw(userId: string, ref: MessageRef, raw: Buffer) {
+    const f = this.cachedFolder(userId, ref.accountId, ref.folder, ref.uidValidity);
+    if (f && this.cached && raw.length <= this.cached.maxBodyBytes && this.cached.bodyBytesPerAccount > 0) {
+      const { bodyBytesPerAccount } = this.cached;
+      this.fromCache(userId, ref.accountId, ref.folder, undefined, ({ cache }) => {
+        cache.putBody(f, ref.uid, raw);
+        cache.enforceBodyBudget(userId, ref.accountId, bodyBytesPerAccount);
+      });
+    }
+  }
+
   async fetchRaw(
     userId: string,
     ref: MessageRef,
     maxBytes: number,
   ): Promise<{ raw: Buffer; flags: Set<string>; internalDate: Date | null }> {
-    const f = this.cachedFolder(userId, ref.accountId, ref.folder, ref.uidValidity);
-    if (f) {
-      const hit = this.fromCache(userId, ref.accountId, ref.folder, null, ({ cache }) => {
-        const m = cache.message(f, ref.uid);
-        const raw = m && cache.body(f, ref.uid);
-        return m && raw ? { raw, flags: imapFlags(m.summary), internalDate: toDate(m.internalDate ?? undefined) } : null;
-      });
-      if (hit) return hit;
-    }
+    const hit = this.cachedRaw(userId, ref);
+    if (hit) return hit;
     const res = await this.fetchRawLive(userId, ref, maxBytes);
-    if (f && this.cached && res.raw.length <= this.cached.maxBodyBytes && this.cached.bodyBytesPerAccount > 0) {
-      const { bodyBytesPerAccount } = this.cached;
-      this.fromCache(userId, ref.accountId, ref.folder, undefined, ({ cache }) => {
-        cache.putBody(f, ref.uid, res.raw);
-        cache.enforceBodyBudget(userId, ref.accountId, bodyBytesPerAccount);
-      });
-    }
+    this.storeRaw(userId, ref, res.raw);
     return res;
   }
 
@@ -629,14 +654,55 @@ export class MailService {
       this.checkValidity(mailbox, ref);
       const meta = await client.fetchOne(String(ref.uid), { uid: true, flags: true, internalDate: true, size: true }, { uid: true });
       if (!meta) throw new MessageGoneError('Message not found');
-      if ((meta.size ?? 0) > maxBytes) {
-        throw new MailServerError(`Message is too large to display (${Math.round((meta.size ?? 0) / 1048576)} MB)`, 'protocol');
-      }
-      // `source` is fetched with BODY.PEEK, so reading never sets \Seen implicitly.
-      const full = await client.fetchOne(String(ref.uid), { uid: true, source: true }, { uid: true });
-      if (!full || !full.source) throw new MessageGoneError('Message not found');
-      return { raw: full.source, flags: meta.flags ?? new Set(), internalDate: toDate(meta.internalDate) };
+      return { raw: await this.fetchSource(client, ref, meta.size, maxBytes), flags: meta.flags ?? new Set(), internalDate: toDate(meta.internalDate) };
     });
+  }
+
+  private async fetchSource(client: ImapFlow, ref: MessageRef, size: number | undefined, maxBytes: number): Promise<Buffer> {
+    if ((size ?? 0) > maxBytes) {
+      throw new MailServerError(`Message is too large to display (${Math.round((size ?? 0) / 1048576)} MB)`, 'protocol');
+    }
+    // `source` is fetched with BODY.PEEK, so reading never sets \Seen implicitly.
+    const full = await client.fetchOne(String(ref.uid), { uid: true, source: true }, { uid: true });
+    if (!full || !full.source) throw new MessageGoneError('Message not found');
+    return full.source;
+  }
+
+  /**
+   * What the reader needs to show a message. Small (or cached) messages are downloaded whole;
+   * large ones only as far as needed to show them: headers, BODYSTRUCTURE and the text/HTML
+   * parts. Their attachments and inline images are fetched one part at a time later
+   * (getAttachmentPart), so big attachments never hold up opening the message.
+   */
+  private async loadForDisplay(userId: string, ref: MessageRef, maxBytes: number): Promise<LoadedMessage> {
+    const hit = this.cachedRaw(userId, ref);
+    if (hit) return { kind: 'full', ...hit };
+    const loaded = await this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox): Promise<LoadedMessage> => {
+      this.checkValidity(mailbox, ref);
+      const meta = await client.fetchOne(String(ref.uid), { uid: true, flags: true, internalDate: true, size: true, bodyStructure: true }, { uid: true });
+      if (!meta) throw new MessageGoneError('Message not found');
+      const flags = meta.flags ?? new Set<string>();
+      const internalDate = toDate(meta.internalDate);
+      if ((meta.size ?? 0) <= LIGHT_LOAD_MIN_BYTES || !meta.bodyStructure) {
+        return { kind: 'full', raw: await this.fetchSource(client, ref, meta.size, maxBytes), flags, internalDate };
+      }
+      const plan = planMessage(meta.bodyStructure);
+      const head = await client.fetchOne(String(ref.uid), { uid: true, headers: true }, { uid: true });
+      if (!head || !head.headers) throw new MessageGoneError('Message not found');
+      const readText = async (parts: StructurePart[]) => {
+        const out: string[] = [];
+        for (const p of parts) {
+          const bytes = await fetchPart(client, ref.uid, p, MAX_BODY_PART_BYTES);
+          if (bytes) out.push(decodeText(bytes, p.charset));
+        }
+        return out.length ? out.join('\n') : null;
+      };
+      const html = await readText(plan.html);
+      const text = await readText(plan.text);
+      return { kind: 'partial', headers: head.headers, html, text, parts: plan.attachments, flags, internalDate };
+    });
+    if (loaded.kind === 'full') this.storeRaw(userId, ref, loaded.raw);
+    return loaded;
   }
 
   async getMessage(
@@ -651,8 +717,15 @@ export class MailService {
       fetchImage?: InlineOptions['fetchImage'];
     },
   ): Promise<MessageDetail> {
-    const { raw, flags, internalDate } = await this.fetchRaw(userId, ref, opts.maxBytes);
-    const email = await parseRaw(raw);
+    const loaded = await this.loadForDisplay(userId, ref, opts.maxBytes);
+    const { flags, internalDate } = loaded;
+    let email: ParsedEmail;
+    if (loaded.kind === 'full') email = await parseRaw(loaded.raw);
+    else {
+      // Parse the header block alone, then put in the body that was downloaded separately.
+      email = await parseRaw(Buffer.concat([loaded.headers, Buffer.from('\r\n')]));
+      email = { ...email, html: loaded.html ?? undefined, text: loaded.text ?? undefined, attachments: [] };
+    }
     const decision = decideRemoteImages(email, opts.allowRemote, opts.imageDomains ?? []);
     // Remote images are fetched here and inlined as data: URIs; the browser never fetches them.
     let inlined = new Map<string, string | null>();
@@ -674,6 +747,7 @@ export class MailService {
           allowedBy: decision.allowedBy ? displayDomain(decision.allowedBy) : null,
           skipped: decision.skipped,
         },
+        parts: loaded.kind === 'partial' ? loaded.parts : undefined,
       },
     );
   }
@@ -692,6 +766,33 @@ export class MailService {
       mimeType: att.mimeType || 'application/octet-stream',
       content: attachmentBytes(att),
     };
+  }
+
+  /**
+   * One body part of a message (an attachment or inline image of a partially loaded message),
+   * downloaded on its own and decoded.
+   */
+  async getAttachmentPart(userId: string, ref: MessageRef, part: string, maxBytes: number) {
+    if (!PART_PATTERN.test(part)) throw new MessageGoneError('Attachment not found');
+    return this.pool.withMailbox(userId, ref.accountId, ref.folder, async (client, mailbox) => {
+      this.checkValidity(mailbox, ref);
+      const meta = await client.fetchOne(String(ref.uid), { uid: true, bodyStructure: true }, { uid: true });
+      if (!meta) throw new MessageGoneError('Message not found');
+      const p = meta.bodyStructure ? findPart(meta.bodyStructure, part) : null;
+      if (!p) throw new MessageGoneError('Attachment not found');
+      if (p.size > maxBytes) {
+        throw new MailServerError(`Attachment is too large to download (${Math.round(p.size / 1048576)} MB)`, 'protocol');
+      }
+      // Encoded parts are larger than their content; leave room for that, and for a server
+      // whose size was a little off.
+      const content = await fetchPart(client, ref.uid, p, Math.ceil(maxBytes * 1.4) + 4096);
+      if (!content) throw new MessageGoneError('Attachment not found');
+      return {
+        filename: p.filename || `attachment-${part}`,
+        mimeType: p.mimeType,
+        content,
+      };
+    });
   }
 
   // ---- actions ---------------------------------------------------------------

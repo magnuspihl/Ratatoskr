@@ -1,4 +1,5 @@
 import type {
+  AttachmentView,
   AccountFolders,
   ActionResult,
   AccountInput,
@@ -27,7 +28,10 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+/** How long opening a message may take; the server gives up a little earlier (see deadline.ts). */
+export const MESSAGE_TIMEOUT_MS = 75_000;
+
+async function request<T>(method: string, url: string, body?: unknown, opts: { timeoutMs?: number } = {}): Promise<T> {
   const headers: Record<string, string> = { 'x-ratatoskr': '1' };
   let payload: BodyInit | undefined;
   if (body instanceof FormData) payload = body;
@@ -35,7 +39,15 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
     headers['content-type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const res = await fetch(url, { method, headers, body: payload, credentials: 'same-origin' });
+  const signal = opts.timeoutMs ? AbortSignal.timeout(opts.timeoutMs) : undefined;
+  let res: Response;
+  try {
+    res = await fetch(url, { method, headers, body: payload, credentials: 'same-origin', signal });
+  } catch (err) {
+    // 408: not retried automatically; the user decides whether to try again.
+    if (signal?.aborted) throw new ApiError('This is taking too long. The mail server may be slow or the message very large.', 408);
+    throw err;
+  }
   if (!res.ok) {
     let msg = res.statusText;
     let stale = false;
@@ -101,8 +113,12 @@ export const api = {
   },
   /** auto: the server applies the sender-domain allowlist; load / block: override it. */
   message: (r: MessageRef, remote: RemoteMode) =>
-    request<MessageDetail>('GET', `/api/message?${refQuery(r)}${remote === 'auto' ? '' : `&remote=${remote === 'load' ? 1 : 0}`}`),
-  attachmentUrl: (r: MessageRef, index: number) => `/api/attachment?${refQuery(r)}&index=${index}`,
+    request<MessageDetail>('GET', `/api/message?${refQuery(r)}${remote === 'auto' ? '' : `&remote=${remote === 'load' ? 1 : 0}`}`, undefined, {
+      timeoutMs: MESSAGE_TIMEOUT_MS,
+    }),
+  /** By part for messages that were opened without downloading them whole, else by index. */
+  attachmentUrl: (r: MessageRef, a: Pick<AttachmentView, 'index' | 'part'>) =>
+    `/api/attachment?${refQuery(r)}&${a.part ? `part=${encodeURIComponent(a.part)}` : `index=${a.index}`}`,
   action: (messages: MessageRef[], action: MessageAction) => request<ActionResult>('POST', '/api/messages/actions', { messages, action }),
 
   send: (payload: ComposePayload, files: File[]) => request<SendResult>('POST', '/api/send', composeForm(payload, files)),

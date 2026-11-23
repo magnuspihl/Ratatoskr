@@ -242,6 +242,9 @@ svg { flex-shrink: 0; }
 .list-footer { padding: 14px; display: flex; justify-content: center; }
 .banner { margin: 10px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--accent-soft); font-size: 13px; }
 .banner.error { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.banner:has(> .btn) { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.banner .grow { flex: 1; min-width: 160px; }
+.loading-message { gap: 10px; font-size: 13px; }
 
 /* ---- reader -------------------------------------------------------------- */
 .reader { background: var(--bg); }

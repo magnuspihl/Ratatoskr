@@ -115,7 +115,7 @@ Compose) also works; then it runs as that user, ignores `PUID`/`PGID` and change
 | `PORT` / `HOST` | no | `8080` / `0.0.0.0` | Listen address. |
 | `RATATOSKR_BLOCK_PRIVATE_MAIL_HOSTS` | no | `false` | Refuse IMAP/SMTP hosts that resolve to private/internal addresses. Turn on if untrusted users can log in. Leave off if your mail server is on your LAN. |
 | `RATATOSKR_IMAP_IDLE_TIMEOUT` | no | `300` | Seconds before an unused pooled IMAP connection is closed. |
-| `RATATOSKR_MAX_MESSAGE_MB` | no | `50` | Largest message the server downloads for display. |
+| `RATATOSKR_MAX_MESSAGE_MB` | no | `50` | Largest message the server downloads whole, and largest single attachment it downloads. Messages over 2 MB open without their attachments, which are fetched separately. |
 | `RATATOSKR_MAX_UPLOAD_MB` | no | `25` | Largest total attachment upload when composing. |
 | `RATATOSKR_CACHE` | no | `true` | Keep a local copy of each account's newest INBOX and Sent mail, see [Mail cache](#mail-cache). `false` asks the mail server every time. |
 | `RATATOSKR_CACHE_MESSAGES` | no | `2000` | Newest messages kept per cached folder (50–100000). Older mail is fetched from the mail server as you scroll. |

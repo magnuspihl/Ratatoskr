@@ -2,6 +2,7 @@ import PostalMime from 'postal-mime';
 import type { Address as PmAddress, Attachment, Email } from 'postal-mime';
 import type { Address, AttachmentView, DomainName, MessageDetail } from '../../../shared/types.js';
 import { sanitizeEmailHtml, type SanitizeOptions } from './sanitize.js';
+import { normaliseCid, type StructurePart } from './structure.js';
 
 export type ParsedEmail = Email;
 
@@ -29,10 +30,6 @@ export function attachmentBytes(a: Attachment): Buffer {
   return Buffer.from(a.content.buffer, a.content.byteOffset, a.content.byteLength);
 }
 
-function normaliseCid(cid: string): string {
-  return cid.trim().replace(/^<|>$/g, '').toLowerCase();
-}
-
 export function parseReferences(value: string | undefined): string[] {
   if (!value) return [];
   return value.match(/<[^<>\s]+>/g) ?? [];
@@ -56,6 +53,15 @@ export interface DetailOptions {
     allowedBy: DomainName | null;
     skipped: MessageDetail['allowlistSkipped'];
   };
+  /**
+   * The message's non-body parts, when only its headers and text were downloaded (see
+   * structure.ts). `email` then has no attachments; inline images become placeholders.
+   */
+  parts?: StructurePart[];
+}
+
+function attachmentName(filename: string | null | undefined, mimeType: string, index: number): string {
+  return filename || `attachment-${index + 1}${mimeType === 'message/rfc822' ? '.eml' : ''}`;
 }
 
 /** Turn a parsed message into the view model sent to the browser, sanitizing any HTML. */
@@ -63,9 +69,17 @@ export function buildMessageDetail(email: ParsedEmail, meta: DetailMeta, opts: D
   const usedCids = new Set<string>();
   const byCid = new Map<string, Attachment>();
   for (const a of email.attachments) if (a.contentId) byCid.set(normaliseCid(a.contentId), a);
+  const partByCid = new Map<string, StructurePart>();
+  for (const p of opts.parts ?? []) if (p.contentId && !partByCid.has(p.contentId)) partByCid.set(p.contentId, p);
 
-  const resolveCid = (cid: string): string | null => {
+  const resolveCid = (cid: string): string | { part: string } | null => {
     const key = normaliseCid(cid);
+    const part = partByCid.get(key);
+    if (part) {
+      if (!INLINE_IMAGE.test(part.mimeType)) return null;
+      usedCids.add(key);
+      return { part: part.part };
+    }
     const att = byCid.get(key);
     if (!att || !INLINE_IMAGE.test(att.mimeType)) return null;
     const bytes = attachmentBytes(att);
@@ -86,17 +100,27 @@ export function buildMessageDetail(email: ParsedEmail, meta: DetailMeta, opts: D
     remoteContentBlocked = s.remoteBlocked;
   }
 
-  const attachments: AttachmentView[] = email.attachments
-    .map((a, index) => ({
-      index,
-      filename: a.filename || `attachment-${index + 1}${a.mimeType === 'message/rfc822' ? '.eml' : ''}`,
-      mimeType: a.mimeType || 'application/octet-stream',
-      size: attachmentBytes(a).length,
-      inline: a.disposition === 'inline' || (!!a.contentId && usedCids.has(normaliseCid(a.contentId))),
-      contentId: a.contentId ? normaliseCid(a.contentId) : null,
-    }))
-    // Inline images that were actually displayed in the body aren't listed as attachments.
-    .filter((a) => !(a.contentId && usedCids.has(a.contentId)));
+  const all: AttachmentView[] = opts.parts
+    ? opts.parts.map((p, index) => ({
+        index,
+        part: p.part,
+        filename: attachmentName(p.filename, p.mimeType, index),
+        mimeType: p.mimeType,
+        size: p.size,
+        inline: p.disposition === 'inline' || (!!p.contentId && usedCids.has(p.contentId)),
+        contentId: p.contentId,
+      }))
+    : email.attachments.map((a, index) => ({
+        index,
+        filename: attachmentName(a.filename, a.mimeType, index),
+        mimeType: a.mimeType || 'application/octet-stream',
+        size: attachmentBytes(a).length,
+        inline: a.disposition === 'inline' || (!!a.contentId && usedCids.has(normaliseCid(a.contentId))),
+        contentId: a.contentId ? normaliseCid(a.contentId) : null,
+      }));
+  // Inline images that were actually displayed in the body aren't listed as attachments. In a
+  // partial message they are kept (flagged inline) so the browser knows what to load for them.
+  const attachments = opts.parts ? all : all.filter((a) => !(a.contentId && usedCids.has(a.contentId)));
 
   const date = email.date ? new Date(email.date) : meta.internalDate;
   return {
@@ -126,5 +150,6 @@ export function buildMessageDetail(email: ParsedEmail, meta: DetailMeta, opts: D
     imagesAllowedBy: opts.allowlist?.allowedBy ?? null,
     allowlistSkipped: opts.allowlist?.skipped ?? null,
     attachments,
+    ...(opts.parts ? { partial: true } : {}),
   };
 }

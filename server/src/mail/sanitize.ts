@@ -2,6 +2,7 @@ import { Parser } from 'htmlparser2';
 import sanitizeHtml from 'sanitize-html';
 import type { HtmlStyle } from '../../../shared/types.js';
 import { fetchableImageUrl } from '../net/remoteImages.js';
+import { PART_PATTERN } from './structure.js';
 import { countRules, sanitizeInlineStyle, sanitizeStylesheet } from './css.js';
 
 /**
@@ -27,12 +28,18 @@ const ALLOWED_TAGS = [
   'thead', 'time', 'tr', 'tt', 'u', 'ul', 'var', 'wbr',
 ];
 
+/**
+ * Marks an inline (cid:) image whose bytes the browser fetches after showing the message: the
+ * value is the IMAP part number. Only the sanitizer sets it; a sender's own copy is removed.
+ */
+export const PENDING_IMAGE_ATTR = 'data-ratatoskr-part';
+
 const GLOBAL_ATTRS = ['style', 'class', 'dir', 'lang', 'title', 'align', 'valign', 'width', 'height', 'bgcolor'];
 
 const ALLOWED_ATTRS: Record<string, string[]> = {
   '*': GLOBAL_ATTRS,
   a: ['href', 'name', 'target', 'rel'],
-  img: ['src', 'alt', 'border', 'hspace', 'vspace'],
+  img: ['src', 'alt', 'border', 'hspace', 'vspace', PENDING_IMAGE_ATTR],
   font: ['color', 'face', 'size'],
   table: ['border', 'cellpadding', 'cellspacing', 'background', 'frame', 'rules', 'summary'],
   td: ['colspan', 'rowspan', 'background', 'nowrap', 'abbr', 'headers', 'scope'],
@@ -72,8 +79,11 @@ export interface SanitizeOptions {
    * The result never contains a network URL, so the rendered message makes no requests at all.
    */
   resolveRemote: (url: string) => string | null;
-  /** Resolve a cid: reference (without the "cid:" prefix) to a data: URL, or null. */
-  resolveCid: (cid: string) => string | null;
+  /**
+   * Resolve a cid: reference (without the "cid:" prefix) to a data: URL, to `{ part }` for an
+   * image the browser loads later (only possible in <img>), or null.
+   */
+  resolveCid: (cid: string) => string | { part: string } | null;
 }
 
 export interface SanitizedHtml {
@@ -125,7 +135,10 @@ export function sanitizeEmailHtml(input: string, opts: SanitizeOptions): Sanitiz
   const rewriteResourceUrl = (raw: string): string | null => {
     let src = raw.trim();
     if (src.startsWith('//')) src = `https:${src}`;
-    if (/^cid:/i.test(src)) return opts.resolveCid(src.slice(4));
+    if (/^cid:/i.test(src)) {
+      const r = opts.resolveCid(src.slice(4));
+      return typeof r === 'string' ? r : null;
+    }
     if (SAFE_DATA_IMAGE.test(src)) return src.replace(/\s+/g, '');
     if (/^https?:\/\//i.test(src)) {
       const inlined = opts.allowRemote && fetchableImageUrl(src) ? opts.resolveRemote(src) : null;
@@ -186,9 +199,13 @@ export function sanitizeEmailHtml(input: string, opts: SanitizeOptions): Sanitiz
         }
         if (tagName === 'img') {
           images++;
-          const src = out.src !== undefined ? rewriteResourceUrl(out.src) : null;
-          if (src) out.src = src;
-          else delete out.src;
+          delete out[PENDING_IMAGE_ATTR];
+          const raw = (out.src ?? '').trim();
+          const cid = /^cid:/i.test(raw) ? opts.resolveCid(raw.slice(4)) : undefined;
+          const src = cid === undefined ? (out.src !== undefined ? rewriteResourceUrl(out.src) : null) : cid;
+          delete out.src;
+          if (typeof src === 'string') out.src = src;
+          else if (src && PART_PATTERN.test(src.part)) out[PENDING_IMAGE_ATTR] = src.part;
         }
         if (tagName === 'table') {
           tables++;
