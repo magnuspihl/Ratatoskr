@@ -14,6 +14,8 @@ import { FailureLimiter, hashPassword, passwordSchema, verifyPassword } from '..
 import type { Sessions } from '../auth/session.js';
 import { ComposeError, type ComposeService } from '../mail/send.js';
 import { SnoozeError, type SnoozeService } from '../mail/snooze.js';
+import { DeadlineError, MESSAGE_DEADLINE_MS, withDeadline } from '../deadline.js';
+import { PART_PATTERN } from '../mail/structure.js';
 import { PushSubscriptionError, validateSubscription, type PushService } from '../push/service.js';
 
 declare module 'fastify' {
@@ -91,7 +93,9 @@ const composeSchema = z.object({
   html: z.string().max(5_000_000),
   inReplyTo: z.string().max(1000).nullable(),
   references: z.array(z.string().max(1000)).max(100),
-  forwardFrom: refSchema.extend({ indices: z.array(z.number().int().min(0)).max(100) }).nullable(),
+  forwardFrom: refSchema
+    .extend({ indices: z.array(z.number().int().min(0)).max(100), parts: z.array(z.string().regex(PART_PATTERN)).max(100).optional() })
+    .nullable(),
   replaceDraft: refSchema.nullable(),
   answering: refSchema.nullable(),
 });
@@ -106,6 +110,7 @@ function sendError(reply: FastifyReply, err: unknown) {
   if (err instanceof StaleError) return reply.code(409).send({ error: err.message, stale: true });
   if (err instanceof ComposeError || err instanceof PushSubscriptionError || err instanceof SnoozeError) return reply.code(400).send({ error: err.message });
   if (err instanceof MailServerError) return reply.code(502).send({ error: err.message });
+  if (err instanceof DeadlineError) return reply.code(504).send({ error: err.message });
   reply.log.error({ err }, 'request failed');
   return reply.code(500).send({ error: 'Internal error' });
 }
@@ -404,13 +409,17 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
       // absent: the server decides from the user's sender-domain allowlist.
       const q = refSchema.extend({ remote: z.enum(['0', '1']).optional() }).parse(req.query);
       requireAccount(uid(req), q.accountId);
-      const detail = await mail.getMessage(uid(req), q, {
-        allowRemote: q.remote === undefined ? undefined : q.remote === '1',
-        imageDomains: q.remote === undefined ? store.listImageDomains(uid(req)) : [],
-        imageCache,
-        fetchImage,
-        maxBytes: config.maxMessageBytes,
-      });
+      const detail = await withDeadline(
+        mail.getMessage(uid(req), q, {
+          allowRemote: q.remote === undefined ? undefined : q.remote === '1',
+          imageDomains: q.remote === undefined ? store.listImageDomains(uid(req)) : [],
+          imageCache,
+          fetchImage,
+          maxBytes: config.maxMessageBytes,
+        }),
+        MESSAGE_DEADLINE_MS,
+        'The mail server is taking too long to send this message. Try again in a moment.',
+      );
       const until = snoozedUntil(uid(req))(q);
       if (until) detail.snoozedUntil = until;
       reply.header('cache-control', 'private, no-store');
@@ -422,9 +431,17 @@ export async function registerApiRoutes(app: FastifyInstance, deps: ApiDeps) {
 
   app.get('/api/attachment', async (req, reply) => {
     try {
-      const q = refSchema.extend({ index: z.coerce.number().int().min(0) }).parse(req.query);
+      // index: the n-th attachment of the whole message; part: one IMAP body part, downloaded on
+      // its own (for messages opened without downloading them whole, see MessageDetail.partial).
+      const q = refSchema
+        .extend({ index: z.coerce.number().int().min(0).optional(), part: z.string().regex(PART_PATTERN).optional() })
+        .refine((v) => (v.index === undefined) !== (v.part === undefined), 'Give either index or part')
+        .parse(req.query);
       requireAccount(uid(req), q.accountId);
-      const att = await mail.getAttachment(uid(req), q, q.index, config.maxMessageBytes);
+      const att =
+        q.part !== undefined
+          ? await mail.getAttachmentPart(uid(req), q, q.part, config.maxMessageBytes)
+          : await mail.getAttachment(uid(req), q, q.index!, config.maxMessageBytes);
       // Always a download, never rendered by the browser on our origin.
       return reply
         .header('content-type', 'application/octet-stream')

@@ -724,3 +724,86 @@ describe('sender-domain image allowlist', () => {
     expect(d.imagesAllowedBy).toBeNull();
   });
 });
+
+describe('large messages', () => {
+  // Over LIGHT_LOAD_MIN_BYTES: an HTML body with an inline image, plus a big attachment.
+  const photo = crypto.randomBytes(300 * 1024);
+  const archive = crypto.randomBytes(3 * 1024 * 1024);
+  const b64 = (b: Buffer) => b.toString('base64').replace(/.{76}/g, '$&\r\n');
+  let q = '';
+  let ref = { accountId: '', folder: 'Large', uid: 0, uidValidity: '' };
+
+  beforeAll(async () => {
+    const a = imapClient(ALICE);
+    await a.connect();
+    await a.mailboxCreate('Large').catch(() => undefined);
+    const raw = Buffer.from(
+      `From: ${BOB}\r\nTo: ${ALICE}\r\nSubject: Holiday photos\r\nDate: ${new Date(Date.UTC(2026, 5, 1)).toUTCString()}\r\n` +
+        'Message-ID: <large1@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary="outer"\r\n\r\n' +
+        '--outer\r\nContent-Type: multipart/related; boundary="rel"\r\n\r\n' +
+        '--rel\r\nContent-Type: multipart/alternative; boundary="alt"\r\n\r\n' +
+        '--alt\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nLook at this photo, Ålesund!\r\n' +
+        '--alt\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n' +
+        '<p>Look at this photo, =C5lesund!</p><img src=3D"cid:photo1@example.com" width=3D"400">\r\n' +
+        '--alt--\r\n' +
+        '--rel\r\nContent-Type: image/jpeg; name="photo.jpg"\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <photo1@example.com>\r\nContent-Disposition: inline; filename="photo.jpg"\r\n\r\n' +
+        `${b64(photo)}\r\n--rel--\r\n` +
+        '--outer\r\nContent-Type: application/zip; name="all.zip"\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename="all.zip"\r\n\r\n' +
+        `${b64(archive)}\r\n--outer--\r\n`,
+    );
+    await a.append('Large', raw, [], new Date());
+    await a.logout();
+    const [msg] = await listAll(`accountId=${accounts.alice!.id}&folder=Large`);
+    ref = { accountId: msg!.accountId, folder: 'Large', uid: msg!.uid, uidValidity: msg!.uidValidity };
+    q = `accountId=${ref.accountId}&folder=Large&uid=${ref.uid}&uidValidity=${ref.uidValidity}`;
+  });
+
+  it('opens a large message without its attachments: text and HTML at once, images as placeholders', async () => {
+    const res = await api<MessageDetail>('GET', `/api/message?${q}`);
+    expect(res.status).toBe(200);
+    const d = res.json;
+    expect(d.partial).toBe(true);
+    expect(d.subject).toBe('Holiday photos');
+    expect(d.from[0]!.address).toBe(BOB);
+    expect(d.text).toContain('Look at this photo, Ålesund!');
+    // The HTML part was in ISO-8859-1 and quoted-printable: decoded to the same text.
+    expect(d.html).toContain('Look at this photo, Ålesund!');
+    expect(d.html).toMatch(/<img[^>]*data-ratatoskr-part="1\.2"/);
+    expect(d.html).not.toContain('data:image');
+    // The response carries no attachment bytes.
+    expect(JSON.stringify(d).length).toBeLessThan(20_000);
+    const byName = Object.fromEntries(d.attachments.map((a) => [a.filename, a]));
+    expect(byName['photo.jpg']).toMatchObject({ part: '1.2', mimeType: 'image/jpeg', inline: true, contentId: 'photo1@example.com' });
+    expect(byName['all.zip']).toMatchObject({ part: '2', mimeType: 'application/zip', inline: false });
+    // Sizes are estimates from the encoded size, within a few percent.
+    expect(Math.abs(byName['all.zip']!.size - archive.length) / archive.length).toBeLessThan(0.03);
+  });
+
+  it('downloads a single attachment or inline image of a large message by its part', async () => {
+    const photoRes = await ctx.app.inject({ method: 'GET', url: `/api/attachment?${q}&part=1.2`, headers: { cookie } });
+    expect(photoRes.statusCode).toBe(200);
+    expect(photoRes.rawPayload.equals(photo)).toBe(true);
+    const zip = await ctx.app.inject({ method: 'GET', url: `/api/attachment?${q}&part=2`, headers: { cookie } });
+    expect(zip.statusCode).toBe(200);
+    expect(zip.headers['content-disposition']).toContain('all.zip');
+    expect(zip.rawPayload.equals(archive)).toBe(true);
+  });
+
+  it('rejects malformed or missing attachment parts', async () => {
+    expect((await ctx.app.inject({ method: 'GET', url: `/api/attachment?${q}&part=1;x`, headers: { cookie } })).statusCode).toBe(400);
+    expect((await ctx.app.inject({ method: 'GET', url: `/api/attachment?${q}&part=1&index=0`, headers: { cookie } })).statusCode).toBe(400);
+    expect((await ctx.app.inject({ method: 'GET', url: `/api/attachment?${q}`, headers: { cookie } })).statusCode).toBe(400);
+    expect((await ctx.app.inject({ method: 'GET', url: `/api/attachment?${q}&part=9`, headers: { cookie } })).statusCode).toBe(404);
+  });
+
+  it('forwards attachments of a large message by part', async () => {
+    const res = await multipart<SendResult>(
+      '/api/send',
+      compose(accounts.alice!.id, { to: BOB, subject: 'Fwd: Holiday photos', html: '<p>See attached</p>', forwardFrom: { ...ref, indices: [], parts: ['2'] } }),
+    );
+    expect(res.status).toBe(200);
+    const sent = await listAll(`accountId=${accounts.alice!.id}&folder=Sent&q=Holiday`);
+    expect(sent[0]!.subject).toBe('Fwd: Holiday photos');
+    expect(sent[0]!.hasAttachments).toBe(true);
+  });
+});

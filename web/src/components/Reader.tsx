@@ -32,6 +32,42 @@ import { SnoozeMenu } from './SnoozeMenu';
 import { formatSnoozeTime } from '../snooze';
 import { linkify } from '../mailto';
 import { downloadFile, downloadLabel, downloadPercent, type DownloadState } from '../download';
+import { fillInlineImages, pendingParts, useInlineImages, type InlineImageState } from '../inlineImages';
+
+/** After this long, a message that is still loading says so (it gives up at MESSAGE_TIMEOUT_MS). */
+const SLOW_LOAD_MS = 8_000;
+
+/** True once `active` has been true for `ms` without a break. */
+function useTakingLong(active: boolean, ms: number): boolean {
+  const [long, setLong] = useState(false);
+  useEffect(() => {
+    setLong(false);
+    if (!active) return;
+    const t = setTimeout(() => setLong(true), ms);
+    return () => clearTimeout(t);
+  }, [active, ms]);
+  return active && long;
+}
+
+/**
+ * The attachments to list under a message: everything except inline images that are shown in
+ * the body. An inline image of a large message that couldn't be shown stays downloadable here.
+ */
+export function listedAttachments(d: Pick<MessageDetail, 'attachments' | 'partial' | 'html'>, images: ReadonlyMap<string, InlineImageState>): AttachmentView[] {
+  if (!d.partial || !d.html) return d.attachments;
+  const inBody = new Set(pendingParts(d.html));
+  return d.attachments.filter((a) => !a.part || !inBody.has(a.part) || images.get(a.part)?.status === 'failed');
+}
+
+/** The spinner shown while a message loads, with a word of explanation if it takes a while. */
+export function LoadingMessage({ slow }: { slow: boolean }) {
+  return (
+    <div className="center loading-message">
+      <div className="spinner" />
+      {slow && <div className="muted">Still loading… The mail server is slow to send this message.</div>}
+    </div>
+  );
+}
 
 /**
  * Plain-text body: React escapes everything; only http(s) URLs, mailto: links and email addresses
@@ -378,6 +414,9 @@ function MessageCard({
     retry,
   });
   const d = q.data;
+  const images = useInlineImages(msgRef, d);
+  const html = useMemo(() => (d?.html && d.partial ? fillInlineImages(d.html, images) : (d?.html ?? null)), [d?.html, d?.partial, images]);
+  const slow = useTakingLong(q.isLoading, SLOW_LOAD_MS);
 
   useEffect(() => {
     if (onGone && q.error instanceof ApiError && (q.error.stale || q.error.status === 404)) onGone(q.error.stale);
@@ -429,12 +468,15 @@ function MessageCard({
 
   return (
     <article className="msg-card">
-      {q.isLoading && (
-        <div className="center">
-          <div className="spinner" />
+      {q.isLoading && <LoadingMessage slow={slow} />}
+      {q.error && !q.isFetching && (
+        <div className="banner error">
+          <span className="grow">{(q.error as Error).message}</span>
+          <button className="btn" onClick={() => void q.refetch()}>
+            Try again
+          </button>
         </div>
       )}
-      {q.error && <div className="banner error">{(q.error as Error).message}</div>}
       {d && (
         <>
           {/* In a conversation, clicking the header folds the message away again. */}
@@ -505,17 +547,17 @@ function MessageCard({
             viewToggles
           )}
 
-          {d.attachments.length > 0 && (
+          {listedAttachments(d, images).length > 0 && (
             <div className="attachments">
-              {d.attachments.map((a) => (
-                <AttachmentChip key={a.index} url={api.attachmentUrl(msgRef, a.index)} attachment={a} />
+              {listedAttachments(d, images).map((a) => (
+                <AttachmentChip key={a.index} url={api.attachmentUrl(msgRef, a)} attachment={a} />
               ))}
             </div>
           )}
 
-          {d.html && !showText ? (
+          {html && !showText ? (
             <div className={`msg-frame-wrap ${mode === 'paper' ? 'paper' : ''}`}>
-              <MessageFrame html={d.html} css={d.css} mode={mode} themeKey={theme} />
+              <MessageFrame html={html} css={d.css} mode={mode} themeKey={theme} />
             </div>
           ) : (
             <TextBody text={d.text ?? ''} onMailto={onMailto} />

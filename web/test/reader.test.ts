@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { groupConversations } from '../../shared/threads';
 import type { AccountView, MessageDetail, MessageSummary } from '../../shared/types';
-import { Reader, replyTarget } from '../src/components/Reader';
+import { listedAttachments, LoadingMessage, Reader, replyTarget } from '../src/components/Reader';
 import type { ResolvedTheme } from '../src/hooks';
 import { refKey } from '../src/util';
 
@@ -213,5 +213,31 @@ describe('message bodies', () => {
     const html = render(detail({ html: '<a href="mailto:ada@example.com" target="_blank" rel="noopener noreferrer nofollow">Ada</a>' }));
     expect(html).toContain('/?mailto=mailto%3Aada%40example.com');
     expect(html).not.toMatch(/href=&quot;mailto:/);
+  });
+});
+
+describe('large messages', () => {
+  const photo = { index: 0, part: '1.2', filename: 'photo.jpg', mimeType: 'image/jpeg', size: 4_000_000, inline: true, contentId: 'p@x' };
+  const zip = { index: 1, part: '2', filename: 'all.zip', mimeType: 'application/zip', size: 60_000_000, inline: false, contentId: null };
+  const partial = () => detail({ partial: true, html: '<p>Look!</p><img data-ratatoskr-part="1.2" />', attachments: [photo, zip] });
+
+  it('shows the message right away, with a spinner where an image is still loading', () => {
+    const html = render(partial());
+    expect(html).toContain('Look!');
+    expect(html).toContain('data-ratatoskr-state=&quot;loading&quot;');
+    // The attachment can already be downloaded, by part.
+    expect(html).toContain('all.zip');
+    expect(html).toContain('part=2');
+  });
+
+  it('lists an inline image as an attachment only if it could not be shown', () => {
+    expect(listedAttachments(partial(), new Map()).map((a) => a.filename)).toEqual(['all.zip']);
+    expect(listedAttachments(partial(), new Map([['1.2', { status: 'loaded', src: 'data:image/jpeg;base64,AA' }]])).map((a) => a.filename)).toEqual(['all.zip']);
+    expect(listedAttachments(partial(), new Map([['1.2', { status: 'failed', reason: 'timeout' }]])).map((a) => a.filename)).toEqual(['photo.jpg', 'all.zip']);
+  });
+
+  it('says why a message is still loading once it takes a while', () => {
+    expect(renderToStaticMarkup(createElement(LoadingMessage, { slow: false }))).not.toContain('Still loading');
+    expect(renderToStaticMarkup(createElement(LoadingMessage, { slow: true }))).toContain('Still loading');
   });
 });

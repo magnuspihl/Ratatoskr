@@ -27,6 +27,11 @@ export class ComposeService {
     if (requireRecipients && all.length === 0) throw new ComposeError('Add at least one recipient');
 
     const attachments = [...uploads];
+    // Attachments of a large message are forwarded part by part, without downloading the rest.
+    for (const part of p.forwardFrom?.parts ?? []) {
+      const a = await this.mail.getAttachmentPart(userId, p.forwardFrom!, part, this.opts.maxMessageBytes);
+      attachments.push({ filename: a.filename, contentType: a.mimeType, content: a.content });
+    }
     if (p.forwardFrom && p.forwardFrom.indices.length) {
       const original = await this.mail.getParsed(userId, p.forwardFrom, this.opts.maxMessageBytes);
       for (const i of p.forwardFrom.indices) {

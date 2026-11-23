@@ -179,7 +179,10 @@ export function Composer({ init, accounts, onClose, onToast, onSent, dirtyRef }:
     html: editor.current?.innerHTML ?? '',
     inReplyTo: init.inReplyTo,
     references: init.references,
-    forwardFrom: fwdSource && fwd.length ? { ...fwdSource, indices: fwd.map((a) => a.index) } : null,
+    forwardFrom:
+      fwdSource && fwd.length
+        ? { ...fwdSource, indices: fwd.filter((a) => !a.part).map((a) => a.index), parts: fwd.flatMap((a) => (a.part ? [a.part] : [])) }
+        : null,
     replaceDraft: draft,
     answering: init.answering,
   });

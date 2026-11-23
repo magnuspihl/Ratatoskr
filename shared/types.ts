@@ -114,8 +114,14 @@ export interface ListResponse {
 
 export interface AttachmentView {
   index: number;
+  /**
+   * IMAP body part number, set when the message was opened without downloading it whole (see
+   * MessageDetail.partial): the attachment is then fetched by part instead of by index.
+   */
+  part?: string;
   filename: string;
   mimeType: string;
+  /** Bytes; an estimate when `part` is set. */
   size: number;
   inline: boolean;
   contentId: string | null;
@@ -156,6 +162,12 @@ export interface MessageDetail {
   /** The sender is allowlisted, but the message failed DMARC so images were not loaded automatically. */
   allowlistSkipped: 'dmarc-fail' | null;
   attachments: AttachmentView[];
+  /**
+   * The message is large, so only its headers and text were downloaded: attachments are fetched
+   * by part, and inline images in `html` are <img data-ratatoskr-part="…"> placeholders that the
+   * browser fills in (from the attachment with that part) once they have loaded.
+   */
+  partial?: boolean;
   /** ISO time the message returns to the inbox, while it waits in the Snoozed folder. */
   snoozedUntil?: string;
 }
@@ -213,7 +225,7 @@ export interface ComposePayload {
   inReplyTo: string | null;
   references: string[];
   /** Attachments carried over from an existing message (forward / draft edit). */
-  forwardFrom: (MessageRef & { indices: number[] }) | null;
+  forwardFrom: (MessageRef & { indices: number[]; parts?: string[] }) | null;
   /** Existing draft to replace when saving or sending. */
   replaceDraft: MessageRef | null;
   /** Message being replied to; flagged as answered after sending. */

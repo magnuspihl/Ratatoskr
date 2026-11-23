@@ -55,6 +55,9 @@ body { margin: 0; padding: 20px 24px; font: 15px/1.55 system-ui, -apple-system, 
 img { max-width: 100%; height: auto; }
 /* Images that were blocked or couldn't be loaded keep their size as a neutral placeholder. */
 img:not([src]) { display: inline-block; min-width: 1px; min-height: 1px; background: rgba(128, 128, 128, 0.12); }
+/* Inline images of a large message, while they load (a spinner) or after they failed. */
+img[data-ratatoskr-state] { object-fit: none; object-position: center; min-width: 48px; min-height: 48px; max-height: 320px;
+  background: rgba(128, 128, 128, 0.12); border-radius: 4px; }
 pre { white-space: pre-wrap; }
 blockquote { margin: 0.5em 0 0.5em 0.25em; padding-left: 0.9em; border-left: 3px solid ${color(p.border)}; }
 table { max-width: 100%; }`;
